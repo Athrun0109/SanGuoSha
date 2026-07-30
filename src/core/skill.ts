@@ -1,0 +1,155 @@
+/**
+ * 技能系统 —— 这是你 DIY 时唯一需要动的地方。
+ *
+ * 一个技能只可能是下面四种之一:
+ *
+ *  1. triggered  触发技:在某个时机自动/可选地发动。       例:奸雄、遗计、连营
+ *  2. active     主动技:出牌阶段主动点的技能。            例:制衡、苦肉、离间
+ *  3. viewAs     转化技:把手里的牌当成另一张牌用/打出。    例:武圣、龙胆、倾国
+ *  4. static     状态技:持续修改某个数值或规则(查询表)。 例:马术、咆哮、空城、无双
+ *
+ * 改强度最常见的三种做法:
+ *   - 数值:直接改 effect 里的数字(如遗计发 X 张 -> X+1 张)
+ *   - 频率:改 limit('once-per-turn' / 'once-per-round' / undefined 表示无限)
+ *   - 条件:改 filter / canUse
+ */
+
+import type { Card, CardPattern, Gender, Kingdom, VirtualCard } from './types.js';
+import type { Player } from './player.js';
+import type { Game } from './game.js';
+import type { Timing } from './events.js';
+
+export type SkillLimit = 'once-per-turn' | 'once-per-round' | 'once-per-phase' | 'once-per-game';
+
+interface SkillBase {
+  name: string;
+  /** 说明文本,CLI 里展示给玩家看 */
+  desc?: string;
+  /** 锁定技:满足条件必定发动,不询问 */
+  compulsory?: boolean;
+  /** 发动频率限制 */
+  limit?: SkillLimit;
+  /** 主公技:只有身份为主公时生效 */
+  lordSkill?: boolean;
+  /** 同一时机下的发动顺序,数字大的先(默认 0) */
+  priority?: number;
+}
+
+/** 触发技上下文 */
+export interface TriggerCtx<E = any> {
+  game: Game;
+  /** 技能拥有者 */
+  self: Player;
+  /** 事件对象,具体类型见 events.ts */
+  event: E;
+  timing: Timing;
+}
+
+export interface TriggeredSkill extends SkillBase {
+  kind: 'triggered';
+  timing: Timing | Timing[];
+  /** 返回 true 表示满足发动条件 */
+  filter: (ctx: TriggerCtx) => boolean;
+  effect: (ctx: TriggerCtx) => Promise<void> | void;
+}
+
+export interface ActiveSkill extends SkillBase {
+  kind: 'active';
+  /** 出牌阶段能否点这个技能 */
+  canUse: (game: Game, self: Player) => boolean;
+  /** 技能自己负责询问目标、弃牌等一切交互 */
+  onUse: (game: Game, self: Player) => Promise<void>;
+}
+
+/** 转化技的使用场景 */
+export interface ViewAsContext {
+  /** 'play' = 出牌阶段主动使用;'respond' = 被要求打出/使用 */
+  mode: 'play' | 'respond';
+  /** respond 模式下要求的牌型 */
+  pattern?: CardPattern;
+  /** 求牌用途标签,如 'dodge' 'peach' 'nullify' 'slash' */
+  purpose?: string;
+}
+
+export interface ViewAsSkill extends SkillBase {
+  kind: 'viewAs';
+  /** 该技能能产出的牌名(用于快速判断能否响应),如 ['杀'] */
+  produces: string[];
+  /** 哪些实体牌可以被选作素材 */
+  cardFilter: (game: Game, self: Player, card: Card, selected: Card[], ctx: ViewAsContext) => boolean;
+  /** 需要恰好几张素材牌;返回 0 表示不需要实体牌 */
+  cardCount: number;
+  /** 素材凑齐后产出什么虚拟牌;返回 null 表示不成立 */
+  viewAs: (game: Game, self: Player, cards: Card[], ctx: ViewAsContext) => VirtualCard | null;
+  /** 该场景下能否使用本转化技 */
+  available: (game: Game, self: Player, ctx: ViewAsContext) => boolean;
+}
+
+/**
+ * 状态技:通过"查询"影响规则。引擎会在关键位置调用 game.sumQuery / game.anyQuery。
+ *
+ * 目前引擎支持的查询名(owner 表示该查询读谁的技能):
+ *   数值类(所有贡献相加):
+ *     'attackRange'    owner=自己         攻击范围加成
+ *     'distanceDelta'  owner=起点         计算距离时的修正(马术 = -1)
+ *     'maxHand'        owner=自己         手牌上限加成
+ *     'slashLimit'     owner=使用者       出牌阶段杀的次数加成(Infinity 表示无限)
+ *     'extraDodge'     owner=杀的使用者   目标需要多打出几张闪(无双 = +1)
+ *     'extraSlash'     owner=决斗发起者   对方每次需多打出几张杀(无双 = +1)
+ *     'peachRecover'   owner=被救者       一张桃回复的体力(默认 1)
+ *   布尔类(任一为 true 即成立):
+ *     'prohibitTarget' owner=目标         该角色不能成为这张牌的目标(空城/谦逊)
+ *     'ignoreDistance' owner=使用者       使用该牌无距离限制(奇才)
+ *     'ignoreArmor'    owner=使用者       无视目标防具(青釭剑)
+ *     'invalidToTarget'owner=目标         该牌对自己无效(仁王盾)
+ *     'skipDiscard'    owner=自己         跳过弃牌阶段(克己)
+ *     'noSlashLimit'   owner=使用者       杀无次数限制(咆哮/诸葛连弩)
+ *
+ * 想加新规则杠杆:在这里加一个查询名,然后在 game.ts 相应位置调用一次即可。
+ */
+export interface StaticSkill extends SkillBase {
+  kind: 'static';
+  queries: Record<string, (game: Game, self: Player, ctx: any) => number | boolean | undefined>;
+}
+
+export type Skill = TriggeredSkill | ActiveSkill | ViewAsSkill | StaticSkill;
+
+export interface GeneralDef {
+  name: string;
+  kingdom: Kingdom;
+  gender: Gender;
+  /** 体力上限(主公为 lord 时通常 +1,由 game 处理) */
+  hp: number;
+  skills: Skill[];
+  /** 是否为主公专属加成(标准包主公额外 +1 体力上限的是 4 血主公) */
+  lordBonus?: boolean;
+}
+
+// —————————————————————— 便捷构造器 ——————————————————————
+
+export function triggered(s: Omit<TriggeredSkill, 'kind'>): TriggeredSkill {
+  return { kind: 'triggered', ...s };
+}
+
+export function active(s: Omit<ActiveSkill, 'kind'>): ActiveSkill {
+  return { kind: 'active', ...s };
+}
+
+export function viewAs(s: Omit<ViewAsSkill, 'kind'>): ViewAsSkill {
+  return { kind: 'viewAs', ...s };
+}
+
+export function staticSkill(s: Omit<StaticSkill, 'kind'>): StaticSkill {
+  return { kind: 'static', ...s };
+}
+
+/** 生成技能发动次数的 mark key */
+export function limitKey(skill: SkillBase): string | null {
+  switch (skill.limit) {
+    case 'once-per-turn': return `turn:skill:${skill.name}`;
+    case 'once-per-phase': return `phase:skill:${skill.name}`;
+    case 'once-per-round': return `round:skill:${skill.name}`;
+    case 'once-per-game': return `game:skill:${skill.name}`;
+    default: return null;
+  }
+}

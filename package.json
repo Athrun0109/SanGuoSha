@@ -1,0 +1,27 @@
+{
+  "name": "sanguosha-engine",
+  "version": "0.1.0",
+  "description": "三国杀标准版规则引擎(纯文本 / 可 DIY 武将技能)",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/cli/start.ts",
+    "play": "tsx src/cli/play.ts",
+    "sim": "tsx src/cli/sim.ts",
+    "duel": "tsx src/cli/duel.ts",
+    "mcp": "tsx src/mcp/server.ts",
+    "generals": "tsx src/cli/generals.ts",
+    "join": "tsx src/cli/join.ts",
+    "models": "tsx src/cli/models.ts",
+    "test": "tsx --test src/test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}
