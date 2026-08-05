@@ -15,6 +15,8 @@ import { pickGenerals } from './generals.js';
 import { loadEnv, saveEnv, ENV_FILE } from './env.js';
 import { ROLE_NAME } from '../core/types.js';
 import type { Agent } from '../core/agent.js';
+import type { Player } from '../core/player.js';
+import { Recorder } from '../log/recorder.js';
 
 loadEnv();
 
@@ -56,6 +58,7 @@ interface ModelInfo { id: string; ctx: number; inPrice: number; outPrice: number
 
 /** 兜底清单:拉不到模型列表时用(比如断网) */
 const FALLBACK_MODELS: ModelInfo[] = [
+  { id: 'deepseek/deepseek-v4-flash-0731', ctx: 1048576, inPrice: 0.09, outPrice: 0.18, structured: true },
   { id: 'deepseek/deepseek-v4-flash', ctx: 1048576, inPrice: 0.14, outPrice: 0.28, structured: true },
   { id: 'deepseek/deepseek-v4-pro', ctx: 1048576, inPrice: 0.435, outPrice: 0.87, structured: true },
 ];
@@ -120,7 +123,7 @@ async function setupLLM(): Promise<{ client: any; model: string } | null> {
   if (idx < rec.length) {
     model = rec[idx].id;
   } else {
-    model = await askLine('模型 id(如 deepseek/deepseek-v4-flash)> ');
+    model = await askLine('模型 id(如 deepseek/deepseek-v4-flash-0731)> ');
     if (!model) model = FALLBACK_MODELS[0].id;
     const hit = all.find(m => m.id === model);
     if (hit && !hit.structured) {
@@ -194,13 +197,20 @@ async function main() {
     quiet = !(await confirm('打印模型的思考过程?', true));
   }
 
+  // 接了模型就默认记录 —— 出问题时最需要日志的恰恰是这类局,事后补记不上
+  const rec = (await confirm('记录这一局?(存到 logs/,可用 npm run log 查、npm run replay 重放)', !!llm))
+    ? new Recorder()
+    : null;
+
   // —— 组局 ——
   const llmAgents: LLMAgent[] = [];
+  const recHook = rec?.llmHook();
   const makeLLM = (id: string): Agent => {
     if (!llm) return new BasicAI(id);
     const a = new LLMAgent(id, {
       client: llm.client, model: llm.model, effort: effort as any,
       onDecision: (info: DecisionInfo) => {
+        recHook?.(info);
         if (quiet) return;
         const tag = info.usedFallback
           ? `\x1b[31m兜底 ← ${info.error ?? '未知原因'}\x1b[0m`
@@ -216,15 +226,26 @@ async function main() {
     playerCount: players,
     seed,
     fixedGenerals,
-    log: (m) => console.log(m),
+    log: rec ? rec.logFn(m => console.log(m)) : (m) => console.log(m),
     makeAgent: (_p, i): Agent => {
-      if (i === seat) return new HumanAgent('you');
-      if (mode === 1) return makeLLM('llm');                       // 我 vs 大模型
-      if (mode === 2) return i === 0 ? makeLLM('llm') : new BasicAI(`rule${i}`);
-      if (mode === 3) return makeLLM(`llm-${i}`);
-      return new BasicAI(`rule${i}`);
+      const a: Agent = i === seat ? new HumanAgent('you')
+        : mode === 1 ? makeLLM('llm')                              // 我 vs 大模型
+          : mode === 2 ? (i === 0 ? makeLLM('llm') : new BasicAI(`rule${i}`))
+            : mode === 3 ? makeLLM(`llm-${i}`)
+              : new BasicAI(`rule${i}`);
+      // 重放需要所有座位的选择,规则 AI 和你自己的那部分也要记
+      return rec ? rec.wrap(a) : a;
     },
   });
+
+  if (rec) {
+    rec.bind(game);
+    rec.start({
+      seed, playerCount: players, seat, mode,
+      model: llm?.model ?? null, effort: llm ? effort : null,
+      fixedGenerals: fixedGenerals ?? null,
+    });
+  }
 
   console.log('\n' + '═'.repeat(60));
   console.log(`${players} 人局  seed=${seed}` +
@@ -236,9 +257,24 @@ async function main() {
       (p.seat === seat || p.role === 'lord' ? ` 身份:${ROLE_NAME[p.role]}` : ''));
   }
   console.log('═'.repeat(60));
+  if (rec) console.log(`\x1b[90m记录中 → ${rec.file}\x1b[0m`);
   if (seat >= 0) console.log('提示:任何时候输入 0 都可以查看局势,不消耗你的行动。\n');
 
-  const res = await game.setupAndRun();
+  let res: { winners: Player[]; reason: string };
+  try {
+    res = await game.setupAndRun();
+  } catch (e) {
+    // 崩了也要落个结局,不然最值得查的那一局反而没线索
+    rec?.finish({ crashed: true, error: e instanceof Error ? e.stack ?? e.message : String(e) });
+    rec?.close();
+    throw e;
+  }
+  rec?.finish({
+    reason: res.reason, winners: res.winners.map(p => p.seat),
+    turns: game.turnCount, rounds: game.round,
+    stats: llmAgents.map(a => ({ id: a.id, ...a.stats })),
+  });
+  rec?.close();
 
   console.log('\n最终局面:');
   console.log(game.board(true));
@@ -250,6 +286,11 @@ async function main() {
     const s = a.stats;
     console.log(`  ${a.id}:${s.calls} 次调用,兜底 ${s.fallbacks} 次,` +
       `输入 ${s.inputTokens} / 输出 ${s.outputTokens} tokens`);
+  }
+  if (rec) {
+    console.log(`\n记录已存到 ${rec.file}`);
+    console.log('  npm run log        看概览、兜底、模型延迟');
+    console.log('  npm run replay     重放这一局并和原战报比对');
   }
   closeCli();
 }

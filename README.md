@@ -24,9 +24,9 @@ npm test                  # 规则单元测试
 想让大模型下场打,最简单的是 `npm start` 走向导。手动的话三条路任选:
 
 ```bash
-# A. OpenRouter(便宜,一局约 $0.016)
+# A. OpenRouter(便宜,一局约 $0.010)
 set OPENROUTER_API_KEY=sk-or-...
-npm run duel -- --model=deepseek/deepseek-v4-flash
+npm run duel -- --model=deepseek/deepseek-v4-flash-0731
 
 # B. Anthropic API
 set ANTHROPIC_API_KEY=sk-ant-...
@@ -202,7 +202,7 @@ $env:OPENROUTER_API_KEY="sk-or-..."
 # Git Bash / Linux / macOS
 export OPENROUTER_API_KEY=sk-or-...
 
-npm run duel -- --model=deepseek/deepseek-v4-flash
+npm run duel -- --model=deepseek/deepseek-v4-flash-0731
 ```
 
 **模型名带 `/` 会被自动识别成 OpenRouter**,不用额外指定后端。如果你只设了 `OPENROUTER_API_KEY` 没设 `ANTHROPIC_API_KEY`,直接 `npm run duel` 也会默认走 OpenRouter + DeepSeek V4 Flash。
@@ -218,16 +218,19 @@ npm run models              # 常见几家全列出来
 
 这个命令不需要 API key(OpenRouter 的模型列表是公开的)。输出里带 ✓ 的支持 `structured_outputs` —— **本项目靠它保证模型返回合法 JSON,建议优先选带 ✓ 的**。
 
-`deepseek/deepseek-v4-flash` 的实测参数:
+**默认模型是 `deepseek/deepseek-v4-flash-0731`**。几个 flash 变体的实测参数:
 
-| | |
-|---|---|
-| 上下文 | 1,048,576 |
-| 输入 / 输出 | $0.14/M / $0.28/M |
-| `structured_outputs` | ✓ |
-| `reasoning_effort` | ✓ |
+| 模型 id | 上线 | 输入 | 输出 | structured_outputs | 上下文 |
+|---|---|---|---|---|---|
+| **`deepseek/deepseek-v4-flash-0731`** | 2026-07-31 | **$0.09/M** | **$0.18/M** | ✓ | 1M |
+| `deepseek/deepseek-v4-flash` | 2026-04-24 | $0.14/M | $0.28/M | ✓ | 1M |
+| `~deepseek/deepseek-v4-flash-latest` | 滚动别名 | $0.09/M | $0.18/M | ✓ | 1M |
 
-**成本**:按下面「实测体积」那节的数字估算,一局约 94k 输入 + 9k 输出 tokens,**单局约 $0.016**,$10 大概能打 600+ 局。
+两个坑:不带后缀的 `deepseek-v4-flash` **不是滚动别名**,它钉在四月快照上(OpenRouter 里的显示名就叫「0423」);真正跟着最新版走的是带 `~` 前缀的 `latest`。另外 0731 的 `max_completion_tokens` 是 65536(0423 是 393216),本项目只用 8192,无影响。
+
+**成本**:按下面「实测体积」那节的数字估算,一局约 94k 输入 + 9k 输出 tokens,按 0731 的价格**单局约 $0.010**,$10 大概能打 1000 局。
+
+这些数字都是从 OpenRouter 的模型接口实时查的,自己核对:`npm run models deepseek`。
 
 ### 用 Anthropic API
 
@@ -479,6 +482,91 @@ npm run mcp        # stdio,给别的 MCP 客户端用
 
 7 个端到端测试真的把 server 当子进程拉起来走 stdio 打完整局,验证的就是 `.mcp.json` 里那条启动命令。
 
+
+## 对局记录与重放
+
+排查 LLM 对局的 bug,光看终端刷过去的战报是不够的 —— 模型的推理、每次重试、当时它手里
+到底有什么牌,都得留下来。给任意一局加 `--record` 即可:
+
+```bash
+npm run duel -- --record             # 1v1(含模型的原始响应、每次重试、token 用量)
+npm run play -- 8 -1 --record        # 8 人局
+```
+
+落在 `logs/` 下,一局两个文件:
+
+| 文件 | 用途 |
+|---|---|
+| `<时间戳>.jsonl` | 每行一个事件,给工具读,也是重放的输入 |
+| `<时间戳>.log` | 战报 + 每次决策的选项和推理,直接翻 |
+
+### 看记录
+
+```bash
+npm run log                      # 最新一局的概览:开局、结果、兜底、模型延迟
+npm run log -- --decisions       # 完整决策流水(选项全列出,选中的高亮,附推理)
+npm run log -- --slow=10         # 最慢的 10 次模型调用 —— 查卡死用这个
+npm run log -- --fallbacks       # 每次兜底的原因、各次重试耗时、模型原始响应
+npm run log -- --grep=闪电        # 在战报里搜,带前后各 2 行
+npm run log -- --seat=1 --turn=7  # 只看某个座位 / 某个回合
+npm run log -- --ls              # 列出所有记录
+```
+
+概览长这样:
+
+```
+20260805-170540.jsonl
+  seed=123  model="deepseek/deepseek-v4-flash-0731"  effort=low
+  [0] 刘备 5/5 lord   技能:仁德/激将  起手:杀[♥J] 顺手牵羊[♦4] 杀[♦10] 过河拆桥[♣4]
+  ...
+  结果 反贼获胜  31 回合 / 324ms / 290 次决策
+
+模型调用
+  llm: 74 次  延迟 中位 1.9s / p90 4.2s / 最慢 11.3s  重试 2  兜底 1  输出 8134 tokens
+```
+
+### 重放
+
+```bash
+npm run replay                   # 重放最新一局,和原战报逐行比对
+npm run replay -- --diff         # 分叉点前后各 10 行对照
+npm run replay -- 20260805-170540.jsonl
+```
+
+重放靠 **seed + 每个座位每次选择的下标**:牌堆由 seed 决定,选择由记录决定,两者合起来
+足以把牌局逐步还原,不需要序列化任何牌对象。所以:
+
+- **LLM 打出的怪招能无成本地反复复现。** 下次它未必这么选,但记录里那一局可以重演任意多次,不用再调模型。
+- **改完引擎跑一遍就知道影响面。** 战报从哪一行开始不一样,那一行就是这次改动的实际落点:
+
+```
+✗ 第 49 行开始不同(前 49 行一致)
+  原:  2号位·赵云 选择了 ♣,展示的牌是 杀[♣7]
+  现:  2号位·赵云 选择了 ♣,展示的牌是 青釭剑[♠6]
+```
+
+记录对不上时(改动导致选项列表变了、决策数量变了)不会硬崩:记一条分叉,该次决策交给
+规则 AI,牌局继续跑完 —— 要看的是"第一处分叉在哪",后面跑成什么样反而次要。
+
+### 两个设计要点
+
+**包裹每一个 agent,不只是 LLM。** 重放一局需要*所有*座位的每一次选择,少了规则 AI 的那部分,
+牌局在第一个分叉点就跑偏了。所以 `Recorder.wrap()` 对 `BasicAI` / `HumanAgent` / `LLMAgent` 一视同仁。
+
+**同步写盘。** 这工具存在的意义就是查卡死和崩溃,所以每个事件都 `appendFileSync`。
+进程被 Ctrl+C 掐掉或卡在网络请求上时,磁盘上的记录必须是完整到最后一刻的
+(`npm run log` 读到没有 `end` 事件会直接告诉你这局是被中断的)。
+
+### 顺手修掉的一个 bug
+
+重放工具第一次跑就把 `BasicAI.chooseSuit` 抓了出来:它取的是 `game.rng` —— 牌堆那条随机流。
+于是"AI 随手选个花色"会顺带把洗牌序列拨走一格,后果有两个:
+
+1. 重放从此对不上(选择的下标能还原,rng 的消耗还原不了);
+2. **换个 AI 就等于换了副牌**,AI 之间的胜率对比不干净。
+
+现在 AI 走 `agentRng(game.seed, id)` 开的独立流,和牌堆互不干扰。
+`game.rng` 上加了注释说明这条边界。
 
 ## 当前的 AI 水平
 

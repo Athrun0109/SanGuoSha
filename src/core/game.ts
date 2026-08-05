@@ -12,6 +12,19 @@ import { Skill, ViewAsContext, limitKey } from './skill.js';
 import type { Agent, CardOption, PlayAction, ResponseCtx } from './agent.js';
 import { getSpec, cardSpecs } from './registry.js';
 
+/**
+ * 给 agent 用的独立随机流。同一局同一个 agent 拿到的序列是固定的,
+ * 但它和牌堆那条流互不干扰 —— 这样 AI 掷不掷骰子都不会改变发牌。
+ */
+export function agentRng(seed: number, id: string): RNG {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return new RNG((seed ^ h) >>> 0);
+}
+
 export class GameOver extends Error {
   constructor(public winners: Player[], public reason: string) {
     super(reason);
@@ -26,10 +39,12 @@ export interface GameOptions {
   verbose?: boolean;
 }
 
+export const DEFAULT_SEED = 20260729;
+
 /** 简单可重现的伪随机 */
 export class RNG {
   private s: number;
-  constructor(seed = 20260729) { this.s = seed >>> 0 || 1; }
+  constructor(seed = DEFAULT_SEED) { this.s = seed >>> 0 || 1; }
   next(): number {
     this.s ^= this.s << 13; this.s >>>= 0;
     this.s ^= this.s >> 17;
@@ -37,6 +52,8 @@ export class RNG {
     return this.s / 0x100000000;
   }
   int(n: number) { return Math.floor(this.next() * n); }
+  /** 别名,读起来顺一点 */
+  pick<T>(arr: T[]): T { return arr[this.int(arr.length)]; }
   shuffle<T>(arr: T[]): T[] {
     for (let i = arr.length - 1; i > 0; i--) {
       const j = this.int(i + 1);
@@ -61,7 +78,15 @@ export class Game {
   finished = false;
   winners: Player[] = [];
 
+  /**
+   * 牌局的随机源:洗牌、摸牌、判定,以及技能里的"随机一张手牌"。
+   *
+   * **AI 不要从这里取随机数。** 一旦决策方消耗了这条流,随机性就成了决策的一部分:
+   * 换个 AI 会连带把牌堆洗成另一副,重放一局记录也会从第一次随机决策起对不上
+   * (下标能还原,rng 的消耗还原不了)。要随机就用 seed 另开一条,见 agentRng()。
+   */
   rng: RNG;
+  readonly seed: number;
   /** 公开信息:谁对谁造成过多少伤害(AI 用来推测身份) */
   hostilityLog = new Map<string, number>();
   /**
@@ -76,7 +101,8 @@ export class Game {
   verbose: boolean;
 
   constructor(opts: GameOptions = {}) {
-    this.rng = new RNG(opts.seed);
+    this.seed = opts.seed ?? DEFAULT_SEED;
+    this.rng = new RNG(this.seed);
     this.logFn = opts.log ?? (() => {});
     this.verbose = opts.verbose ?? true;
   }

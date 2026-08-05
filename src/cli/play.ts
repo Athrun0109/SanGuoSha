@@ -7,6 +7,7 @@
  *   npm run play -- --pick                开局前交互式点将
  *   npm run play -- --generals=关羽,,吕布   直接指定(留空位表示随机)
  *   npm run play -- --seed=42             固定牌局,便于复现
+ *   npm run play -- --record              把整局记到 logs/,可用 npm run replay 重放
  */
 
 import { loadEnv } from './env.js';
@@ -19,6 +20,7 @@ import { BasicAI } from '../ai/basicAI.js';
 import { HumanAgent, closeCli, askLine } from './humanAgent.js';
 import { pickGenerals } from './generals.js';
 import { ROLE_NAME } from '../core/types.js';
+import { Recorder } from '../log/recorder.js';
 
 function flag(name: string): string | undefined {
   const hit = process.argv.find(a => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -55,13 +57,24 @@ async function main() {
   console.log(`\n三国杀 · 标准版  |  ${n} 人身份局  |  ` +
     `${watch ? '观战模式(全 AI)' : `你是 ${seat} 号位`}  |  seed=${seed}\n`);
 
+  const rec = flag('record') !== undefined ? new Recorder() : null;
+
   const game = createGame({
     playerCount: n,
     seed,
     fixedGenerals,
-    log: (m) => console.log(m),
-    makeAgent: (p, i) => (!watch && i === seat ? new HumanAgent('you') : new BasicAI(`ai${i}`)),
+    log: rec ? rec.logFn(m => console.log(m)) : (m) => console.log(m),
+    makeAgent: (p, i) => {
+      const a = !watch && i === seat ? new HumanAgent('you') : new BasicAI(`ai${i}`);
+      return rec ? rec.wrap(a) : a;
+    },
   });
+
+  if (rec) {
+    rec.bind(game);
+    rec.start({ seed, playerCount: n, seat: watch ? -1 : seat, fixedGenerals: fixedGenerals ?? null });
+    console.log(`\x1b[90m记录中 → ${rec.file}\x1b[0m`);
+  }
 
   const me = watch ? null : game.players[seat];
   if (me) {
@@ -70,6 +83,11 @@ async function main() {
   }
 
   const res = await game.setupAndRun();
+  rec?.finish({
+    reason: res.reason, winners: res.winners.map(p => p.seat),
+    turns: game.turnCount, rounds: game.round,
+  });
+  rec?.close();
   console.log('\n最终局面:');
   console.log(game.board(true));
   if (me) console.log(`\n你${res.winners.includes(me) ? '赢了 🎉' : '输了'}`);

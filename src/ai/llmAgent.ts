@@ -69,6 +69,14 @@ export interface DecisionInfo {
   /** 本次 user 消息的字符数,用于估算提示词体积 */
   payloadChars: number;
   usage?: Record<string, number>;
+
+  // —— 下面这些是给日志/排查用的,平时不打印 ——
+  /** 实际发出去的那条 user 消息全文 */
+  payload?: string;
+  /** 模型返回的原始文本(没解析前的) */
+  raw?: string;
+  /** 每次尝试的细节:第几次、耗时、用了多少预算、错在哪 */
+  attempts?: Array<{ n: number; ms: number; maxTokens: number; error?: string; usage?: Record<string, number> }>;
 }
 
 /** 重试也没用的错误:凭据、模型名、权限 */
@@ -163,8 +171,12 @@ export class LLMAgent extends ChoiceAgent {
 
     let budget = this.o.maxTokens;
     let lastErr = '';
+    let rawText = '';
+    const attempts: NonNullable<DecisionInfo['attempts']> = [];
 
     for (let attempt = 0; attempt < 3 && choice === null; attempt++) {
+      const t0 = Date.now();
+      const usedBudget = budget;
       try {
         const res = await this.client.messages.create({
           model: this.o.model,
@@ -187,6 +199,9 @@ export class LLMAgent extends ChoiceAgent {
         if (res.stop_reason === 'refusal') throw new Error('模型拒绝了该请求');
 
         const text = res.content.find(b => b.type === 'text')?.text;
+        // 原始文本要在解析之前留住:解析失败时,这段就是唯一能看出模型到底说了啥的东西
+        if (text) rawText = text;
+        attempts.push({ n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget, usage });
         if (!text) throw new Error('响应中没有文本内容');
         const parsed = extractJson(text);
         thinking = String(parsed.thinking ?? '');
@@ -200,6 +215,10 @@ export class LLMAgent extends ChoiceAgent {
         choice = raw.map(Number);
       } catch (e) {
         lastErr = e instanceof Error ? e.message : String(e);
+        // 请求本身就没发出去时这条尚未入账,补一条;已入账的直接把错误挂上去
+        const rec = attempts[attempts.length - 1];
+        if (rec && rec.n === attempt + 1) rec.error = lastErr;
+        else attempts.push({ n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget, error: lastErr });
         // 凭据/模型名这类错误重试多少次都一样,直接放弃
         if (PERMANENT_ERROR.test(lastErr)) break;
         // 正文被推理 token 挤空了 —— 加大预算再来一次,这是最常见的一种失败
@@ -235,6 +254,7 @@ export class LLMAgent extends ChoiceAgent {
       choice: choice ?? [], usedFallback: choice === null,
       error: choice === null ? (lastErr || '模型连续给出不合法的选择') : undefined,
       payloadChars: payload.length, usage,
+      payload, raw: rawText, attempts,
     });
     return choice;
   }

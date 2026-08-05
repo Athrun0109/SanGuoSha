@@ -3,7 +3,7 @@
  *
  * 后端二选一,靠模型名自动判断(OpenRouter 的 id 一律是「厂商/型号」),也可以 --provider 强制:
  *   npm run duel                                          Anthropic + claude-opus-5
- *   npm run duel -- --model=deepseek/deepseek-v4-flash     OpenRouter + DeepSeek
+ *   npm run duel -- --model=deepseek/deepseek-v4-flash-0731  OpenRouter + DeepSeek
  *
  * 其它开关:
  *   --both                双方都由模型打
@@ -14,6 +14,8 @@
  *   --generals=关羽,吕布    手动点将(留空位表示随机,如 ",吕布")
  *   --handicap=0          关掉后手补牌
  *   --seed=42 --quiet     固定牌局 / 不打印模型的推理
+ *   --record              把整局(含每次决策、模型原始响应)记到 logs/,可用 npm run replay 重放
+ *   --record-prompt       连提示词全文一起记(体积大十几倍,只在查提示词问题时开)
  */
 
 import { loadEnv } from './env.js';
@@ -27,6 +29,8 @@ import { LLMAgent, type DecisionInfo } from '../ai/llmAgent.js';
 import { HumanAgent, closeCli } from './humanAgent.js';
 import { ROLE_NAME } from '../core/types.js';
 import type { Agent } from '../core/agent.js';
+import type { Player } from '../core/player.js';
+import { Recorder } from '../log/recorder.js';
 
 function flag(name: string): string | undefined {
   const hit = process.argv.find(a => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -49,7 +53,7 @@ async function main() {
       : process.env.OPENROUTER_API_KEY && !process.env.ANTHROPIC_API_KEY ? 'openrouter'
         : 'anthropic');
   const model = modelArg
-    ?? (provider === 'openrouter' ? 'deepseek/deepseek-v4-flash' : 'claude-opus-5');
+    ?? (provider === 'openrouter' ? 'deepseek/deepseek-v4-flash-0731' : 'claude-opus-5');
 
   const handicapArg = flag('handicap');
   const handicap = handicapArg === undefined ? DUEL_HANDICAP : Number(handicapArg);
@@ -101,6 +105,11 @@ async function main() {
     return;
   }
 
+  // 记录器要在建局之前就创建好(它得接管 log 回调),建完局再 bind 拿上下文
+  const rec = flag('record') !== undefined || flag('record-prompt') !== undefined
+    ? new Recorder({ fullPrompt: flag('record-prompt') !== undefined })
+    : null;
+
   const show = (info: DecisionInfo) => {
     if (quiet) return;
     const tag = info.usedFallback
@@ -110,8 +119,12 @@ async function main() {
   };
 
   const llmAgents: LLMAgent[] = [];
+  const recHook = rec?.llmHook();
   const makeLLM = (id: string) => {
-    const a = new LLMAgent(id, { client, model, effort, codec, historyRounds, onDecision: show });
+    const a = new LLMAgent(id, {
+      client, model, effort, codec, historyRounds,
+      onDecision: (info) => { show(info); recHook?.(info); },
+    });
     llmAgents.push(a);
     return a;
   };
@@ -123,18 +136,31 @@ async function main() {
       : `${who}(0号位) vs 规则AI(1号位)`);
   console.log('');
 
+  const startingHand = [4, 4 + handicap];
   const game = createGame({
     playerCount: 2,
     seed,
     fixedGenerals,
-    startingHand: [4, 4 + handicap],
-    log: (m) => console.log(m),
+    startingHand,
+    log: rec ? rec.logFn(m => console.log(m)) : (m) => console.log(m),
     makeAgent: (p, i): Agent => {
-      if (both) return makeLLM(`llm-${i}`);
-      if (human) return i === 0 ? new HumanAgent('you') : makeLLM('llm');
-      return i === 0 ? makeLLM('llm') : new BasicAI('rule');
+      const a: Agent = both ? makeLLM(`llm-${i}`)
+        : human ? (i === 0 ? new HumanAgent('you') : makeLLM('llm'))
+          : (i === 0 ? makeLLM('llm') : new BasicAI('rule'));
+      // 重放需要**所有**座位的选择,规则 AI 和人类的那部分也不能漏
+      return rec ? rec.wrap(a) : a;
     },
   });
+
+  if (rec) {
+    rec.bind(game);
+    rec.start({
+      seed, provider, model, effort, codec, historyRounds,
+      playerCount: 2, startingHand, handicap, fixedGenerals: fixedGenerals ?? null,
+      mode: both ? 'both' : human ? 'human' : 'llm-vs-rule',
+    });
+    console.log(`\x1b[90m记录中 → ${rec.file}\x1b[0m`);
+  }
 
   for (const p of game.players) {
     console.log(`[${p.seat}] ${p.general.name} ${p.maxHp}血 起手${p.handCount}张 身份:${ROLE_NAME[p.role]}`);
@@ -142,7 +168,24 @@ async function main() {
   if (handicap > 0) console.log(`(后手补牌 +${handicap},用于补偿先手优势)`);
 
   const t0 = Date.now();
-  const res = await game.setupAndRun();
+  let res: { winners: Player[]; reason: string };
+  try {
+    res = await game.setupAndRun();
+  } catch (e) {
+    // 崩了也要把结局写进记录 —— 否则最有价值的那一局反而没留下线索
+    rec?.finish({ crashed: true, error: e instanceof Error ? e.stack ?? e.message : String(e) });
+    rec?.close();
+    throw e;
+  }
+  rec?.finish({
+    reason: res.reason,
+    winners: res.winners.map(p => p.seat),
+    turns: game.turnCount,
+    rounds: game.round,
+    ms: Date.now() - t0,
+    stats: llmAgents.map(a => ({ id: a.id, ...a.stats })),
+  });
+  rec?.close();
 
   console.log('\n最终局面:');
   console.log(game.board(true));

@@ -11,7 +11,7 @@
  */
 
 import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
-import type { Game } from '../core/game.js';
+import { agentRng, type Game, type RNG } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { Card, Suit, SUITS, VirtualCard, suitColor } from '../core/types.js';
 import { cardSpecs } from '../core/registry.js';
@@ -457,8 +457,18 @@ export class BasicAI implements Agent {
     }
   }
 
+  /**
+   * 走自己的随机流,而不是 game.rng。
+   * 用 game.rng 的话,"AI 随手选了个花色"这一下会把牌堆的洗牌序列也拨走一格 ——
+   * 换个 AI 就等于换了副牌,重放记录也会从这里开始对不上。
+   */
+  private rand: RNG | null = null;
+  private rng(game: Game): RNG {
+    return (this.rand ??= agentRng(game.seed, this.id));
+  }
+
   async chooseSuit(game: Game, self: Player, prompt: string): Promise<Suit> {
-    return SUITS[game.rng.int(SUITS.length)];
+    return this.rng(game).pick(SUITS);
   }
 
   async arrangeCards(
