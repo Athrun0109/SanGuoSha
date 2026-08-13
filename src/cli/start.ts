@@ -216,6 +216,11 @@ async function main() {
           ? `\x1b[31m兜底 ← ${info.error ?? '未知原因'}\x1b[0m`
           : `\x1b[36m${info.thinking}\x1b[0m`;
         console.log(`  [${info.agentId}] ${tag}`);
+        // 身份判断有变动就报一句 —— 这是多人局里最值得盯的信号
+        if (info.reads?.length) {
+          console.log(`  \x1b[35m[${info.agentId}] 身份判断 ` +
+            info.reads.map(r => `${r.seat}号=${r.role}`).join(' ') + '\x1b[0m');
+        }
       },
     });
     llmAgents.push(a);

@@ -22,6 +22,7 @@ import type { Agent } from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { BasicAI } from './basicAI.js';
+import { BeliefTable, READS_SCHEMA, type BeliefRow, type Read } from './beliefs.js';
 import { ChoiceAgent, validateChoice } from './choiceAgent.js';
 import type { CodecMode } from './codec.js';
 import {
@@ -49,8 +50,13 @@ export interface LLMAgentOptions {
   codec?: CodecMode;
   /** 战报回溯几轮 */
   historyRounds?: number;
-  /** 战报最多几行(过滤掉噪声行之后再计数) */
+  /** 战报最多几行(过滤掉噪声行之后再计数)。粗保险,真正起作用的是 maxLogChars */
   maxLogLines?: number;
+  /**
+   * 战报的字数预算 —— 这才是真正的闸门。
+   * 按行封顶是没用的:精简掉噪声行之后,滑窗只会往前多吃几行旧战报,一个字都省不下来。
+   */
+  maxLogChars?: number;
   /** 回带几条自己最近的推理 */
   selfNotes?: number;
   fallback?: Agent;
@@ -77,6 +83,11 @@ export interface DecisionInfo {
   raw?: string;
   /** 每次尝试的细节:第几次、耗时、用了多少预算、错在哪 */
   attempts?: Array<{ n: number; ms: number; maxTokens: number; error?: string; usage?: Record<string, number> }>;
+
+  /** 本次生效的身份判断更新(模型没更新时为空) */
+  reads?: Read[];
+  /** 更新之后的完整判断表,带真实身份和对错 —— 只用于日志,不回流给模型 */
+  beliefs?: BeliefRow[];
 }
 
 /** 重试也没用的错误:凭据、模型名、权限 */
@@ -89,6 +100,19 @@ const DECISION_SCHEMA = {
   properties: {
     thinking: { type: 'string', description: '简短中文推理' },
     choice: { type: 'array', items: { type: 'integer' }, description: '选中的选项编号' },
+    reads: READS_SCHEMA,
+  },
+  // strict 模式下所有字段都必须列进 required,所以 reads 不更新时给空数组
+  required: ['thinking', 'choice', 'reads'],
+  additionalProperties: false,
+} as const;
+
+/** 2 人局身份从配置就能推出,没什么可猜的,连 reads 字段一起省掉 */
+const DUEL_SCHEMA = {
+  type: 'object',
+  properties: {
+    thinking: DECISION_SCHEMA.properties.thinking,
+    choice: DECISION_SCHEMA.properties.choice,
   },
   required: ['thinking', 'choice'],
   additionalProperties: false,
@@ -107,6 +131,8 @@ export class LLMAgent extends ChoiceAgent {
   private notes: string[] = [];
   private lastError = '';
   private errorRepeats = 0;
+  /** 身份判断的持久记忆。人数 ≤2 时自动停用 */
+  beliefs: BeliefTable | null = null;
 
   stats = {
     calls: 0, fallbacks: 0, payloadChars: 0,
@@ -125,7 +151,8 @@ export class LLMAgent extends ChoiceAgent {
       maxTokens: opts.maxTokens ?? 8192,
       codec: opts.codec ?? 'verbose',
       historyRounds: opts.historyRounds ?? 10,
-      maxLogLines: opts.maxLogLines ?? 30,
+      maxLogLines: opts.maxLogLines ?? 40,
+      maxLogChars: opts.maxLogChars ?? 350,
       selfNotes: opts.selfNotes ?? 4,
     };
     this.codecMode = this.o.codec;
@@ -157,11 +184,20 @@ export class LLMAgent extends ChoiceAgent {
     const system = this.ensureSystem(game, self);
     const c = this.c(game);
 
+    this.beliefs ??= new BeliefTable(game.players.length);
+    this.beliefs.sync(game, self);
+    // 一轮只催一次复核 —— 一局两百多次决策,大多是"要不要出闪",
+    // 每次都让它重算身份纯属烧 token
+    const wantReads = this.beliefs.claimRefresh(game.round);
+
     const parts = [situationBlock(game, self, c)];
-    const ev = eventsBlock(this.recentLog(game), c);
+    const ev = eventsBlock(this.recentLog(game), c, this.o.maxLogChars);
     if (ev) parts.push(ev);
+    const bl = this.beliefs.render(game, self, c);
+    if (bl) parts.push(bl);
     if (this.notes.length) parts.push(`你最近的判断\n${this.notes.map(n => '- ' + n).join('\n')}`);
     parts.push(questionBlock(question, options, min, max, c));
+    if (wantReads) parts.push(BeliefTable.refreshHint());
     const payload = parts.join('\n\n');
 
     const messages: any[] = [{ role: 'user', content: payload }];
@@ -172,6 +208,7 @@ export class LLMAgent extends ChoiceAgent {
     let budget = this.o.maxTokens;
     let lastErr = '';
     let rawText = '';
+    let reads: Read[] = [];
     const attempts: NonNullable<DecisionInfo['attempts']> = [];
 
     for (let attempt = 0; attempt < 3 && choice === null; attempt++) {
@@ -185,7 +222,10 @@ export class LLMAgent extends ChoiceAgent {
           messages,
           output_config: {
             effort: this.o.effort,
-            format: { type: 'json_schema', schema: DECISION_SCHEMA },
+            format: {
+              type: 'json_schema',
+              schema: this.beliefs.enabled ? DECISION_SCHEMA : DUEL_SCHEMA,
+            },
           },
           cache_control: { type: 'ephemeral' },
         });
@@ -205,6 +245,8 @@ export class LLMAgent extends ChoiceAgent {
         if (!text) throw new Error('响应中没有文本内容');
         const parsed = extractJson(text);
         thinking = String(parsed.thinking ?? '');
+        // 身份判断先收下 —— 哪怕 choice 不合法要重试,这份判断也是有效信息
+        reads = this.beliefs.apply(parsed.reads as Read[] | undefined, game.round);
         const raw = Array.isArray(parsed.choice) ? parsed.choice : [];
         const err = validateChoice(raw, options.length, min, max);
         if (err) {
@@ -255,6 +297,9 @@ export class LLMAgent extends ChoiceAgent {
       error: choice === null ? (lastErr || '模型连续给出不合法的选择') : undefined,
       payloadChars: payload.length, usage,
       payload, raw: rawText, attempts,
+      reads,
+      // 带真相和对错,只进日志 —— 绝不回流给模型
+      beliefs: reads.length ? this.beliefs.entries(game) : undefined,
     });
     return choice;
   }
@@ -268,7 +313,7 @@ export class LLMAgent extends ChoiceAgent {
  * 但换到别的后端(OpenRouter 上的各种模型)未必那么规矩 —— 可能裹 ```json 围栏、
  * 可能前面带一句废话。这里做最小限度的容错,免得为了一个围栏就退到兜底 AI。
  */
-export function extractJson(text: string): { thinking?: string; choice?: unknown } {
+export function extractJson(text: string): { thinking?: string; choice?: unknown; reads?: unknown } {
   const tryParse = (s: string) => {
     try { return JSON.parse(s); } catch { return null; }
   };

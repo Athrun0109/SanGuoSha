@@ -711,10 +711,13 @@ export class Game {
     const card = this.drawFromDeck(1)[0];
     this.processing.push(card);
     const ev: JudgeEvent = { player: p, reason, card, check };
-    this.log(`  ${p.name} 判定[${reason}]:${cardLabel(card)}`);
+    // 两行分工:第一行是"翻出了什么"(人看、记牌用,改判技能也要先看到它),
+    // 第二行是"判定成没成"。第二行带上角色和原因,自己就说得清楚一件事 ——
+    // 发给 LLM 的战报只留第二行,不必跨行拼接。
+    this.log(`  ${p.name} 判定[${reason}] 亮出 ${cardLabel(card)}`);
     await this.trigger('JudgeResulting', ev);
     ev.success = check(ev.card);
-    this.log(`  判定结果:${cardLabel(ev.card)} → ${ev.success ? '生效' : '不生效'}`);
+    this.log(`  ${p.name} 判定[${reason}] ${ev.success ? '生效' : '不生效'}`);
     await this.trigger('JudgeResulted', ev);
     if (!ev.taken && this.processing.includes(ev.card)) {
       await this.discardCards([ev.card], '判定牌');

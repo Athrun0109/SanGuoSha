@@ -180,7 +180,7 @@ export class Recorder {
   /** LLMAgent 的 onDecision 钩子。和 duel 里那个只负责打印的 show() 可以并存 */
   llmHook(): (info: DecisionInfo) => void {
     return (info) => {
-      const { payload, raw, attempts, ...rest } = info;
+      const { payload, raw, attempts, reads, beliefs, ...rest } = info;
       this.event('llm', {
         ...rest,
         raw: raw || undefined,
@@ -190,6 +190,14 @@ export class Recorder {
       });
       if (info.usedFallback) this.text(`    !! ${info.agentId} 兜底 ← ${info.error ?? '未知'}`);
       else if (info.thinking) this.text(`    ~~ ${info.agentId}: ${info.thinking}`);
+
+      // 身份判断单独记一条事件:它是按轮更新的,和逐次决策不同频,
+      // 混在 llm 事件里就没法直接做"每轮准确率"的统计
+      if (reads?.length) {
+        this.event('belief', { agentId: info.agentId, reads, table: beliefs });
+        this.text(`    ?? ${info.agentId} 身份判断: ` +
+          reads.map(r => `P${r.seat}=${r.role}${r.conf !== undefined ? `(${r.conf})` : ''}`).join(' '));
+      }
     };
   }
 

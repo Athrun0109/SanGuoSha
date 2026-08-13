@@ -1,0 +1,306 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>三国杀 · 观战</title>
+<style>
+  /* 浅色底、黑字。以后要贴武将图,白底比深色底好配得多。 */
+  :root {
+    --line: #d4d4d4;
+    --line-soft: #ebebeb;
+    --ink: #111;
+    --ink-dim: #767676;
+    --red: #c0392b;
+    --amber: #b45309;
+    --wei: #2563eb; --shu: #c0392b; --wu: #16a34a; --qun: #a16207;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: #fff; color: var(--ink);
+    font: 13px/1.5 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* ——— 顶栏 ——— */
+  #bar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 6px 14px; border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--ink-dim); flex: none;
+  }
+  #bar b { color: var(--ink); font-weight: 600; }
+  #bar .sp { flex: 1; }
+  #dot { width: 7px; height: 7px; border-radius: 50%; background: #16a34a; }
+  #dot.off { background: #c0392b; }
+
+  /* ——— 环形布局 ——— */
+  #table {
+    flex: 1; min-height: 0;
+    display: grid; gap: 10px; padding: 12px;
+    grid-template-columns: 1fr 1.35fr 1fr;
+    grid-template-rows: auto auto 1fr auto;
+    grid-template-areas:
+      "tl  t    tr"
+      "l   mid  r"
+      "bl  mid  br"
+      "me  me   me";
+  }
+  #mid { grid-area: mid; min-height: 0; display: flex; flex-direction: column; }
+  #me  { grid-area: me; }
+
+  /* ——— 角色框 ——— */
+  .seat {
+    border: 1px solid var(--line); border-left-width: 4px; border-radius: 6px;
+    padding: 6px 9px; background: #fff; position: relative;
+    align-self: start;
+  }
+  .seat.wei { border-left-color: var(--wei); }
+  .seat.shu { border-left-color: var(--shu); }
+  .seat.wu  { border-left-color: var(--wu); }
+  .seat.qun { border-left-color: var(--qun); }
+
+  .seat.cur { border-color: var(--amber); border-left-color: var(--amber); background: #fffbeb; }
+  .seat.dead { opacity: .5; }
+  .seat.dead .head { text-decoration: line-through; }
+
+  .head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+  .head .no { color: var(--ink-dim); font-size: 11px; }
+  .head .gen { font-weight: 600; font-size: 14px; }
+  .head .kd {
+    font-size: 11px; padding: 0 4px; border-radius: 3px;
+    border: 1px solid currentColor; line-height: 1.4;
+  }
+  .kd.wei { color: var(--wei); } .kd.shu { color: var(--shu); }
+  .kd.wu  { color: var(--wu); }  .kd.qun { color: var(--qun); }
+
+  .role { font-size: 11px; padding: 0 4px; border-radius: 3px; color: #fff; }
+  .role.lord { background: var(--amber); }
+  .role.loyalist { background: var(--wei); }
+  .role.rebel { background: var(--red); }
+  .role.renegade { background: #7c3aed; }
+  .role.unknown { background: #fff; color: var(--ink-dim); border: 1px dashed var(--line); }
+
+  .badge {
+    position: absolute; top: -8px; right: 8px;
+    background: var(--amber); color: #fff; font-size: 11px;
+    padding: 0 6px; border-radius: 9px;
+  }
+
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 3px; flex-wrap: wrap; }
+  .hp { letter-spacing: 1px; color: var(--red); }
+  .hp .empty { color: #d0d0d0; }
+  .k { color: var(--ink-dim); font-size: 11px; }
+  .muted { color: var(--ink-dim); }
+
+  /* ——— 牌 ——— */
+  .card {
+    display: inline-flex; align-items: baseline; gap: 3px;
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 5px; background: #fff; font-size: 12px; white-space: nowrap;
+  }
+  .card .s { font-weight: 600; }
+  .card.red .s { color: var(--red); }
+  .card .n { }
+  .cards { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  .judge { color: #7c3aed; }
+  .back {
+    display: inline-block; width: 13px; height: 18px; vertical-align: -3px;
+    border: 1px solid var(--line); border-radius: 2px;
+    background: repeating-linear-gradient(45deg, #f2f2f2 0 3px, #e4e4e4 3px 6px);
+    margin-right: 2px;
+  }
+
+  /* ——— 自己 ——— */
+  #me .seat { border-left-width: 4px; }
+  #me .hand { margin-top: 5px; }
+  #me .card { font-size: 13px; padding: 3px 7px; }
+
+  /* ——— 战报 ——— */
+  #log {
+    flex: 1; min-height: 0; overflow-y: auto;
+    border: 1px solid var(--line-soft); border-radius: 6px;
+    padding: 8px 10px; background: #fafafa;
+    font: 12px/1.65 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  #log .rd { color: var(--amber); font-weight: 600; }
+  #log .tn { color: var(--wei); }
+  #log .dmg { color: var(--red); }
+  #log .die { color: var(--red); font-weight: 600; }
+
+  #deckinfo { display: flex; gap: 14px; padding: 6px 2px 0; font-size: 12px; color: var(--ink-dim); }
+
+  #over {
+    display: none; position: fixed; inset: 0; place-items: center;
+    background: rgba(255,255,255,.86);
+  }
+  #over.on { display: grid; }
+  #over div {
+    border: 1px solid var(--line); border-radius: 8px; background: #fff;
+    padding: 22px 34px; text-align: center; font-size: 17px;
+  }
+  #over small { display: block; margin-top: 6px; color: var(--ink-dim); font-size: 12px; }
+</style>
+
+<div id="bar">
+  <span id="dot"></span>
+  <span id="hdr">等待开局…</span>
+  <span class="sp"></span>
+  <span id="meta"></span>
+</div>
+
+<div id="table">
+  <div id="me"></div>
+  <div id="mid">
+    <div id="log"></div>
+    <div id="deckinfo"></div>
+  </div>
+</div>
+
+<div id="over"><div><span id="overtxt"></span><small id="oversub"></small></div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+// 逆时针:下家在右,沿右侧向上、经顶部、从左侧下来,上家落在左下。
+// 必须和 state.ts 里的 RING_BY_COUNT 保持一致。
+const RING = ['br', 'r', 'tr', 't', 'tl', 'l', 'bl'];
+const RING_BY_COUNT = {
+  1: ['t'],
+  2: ['tr', 'tl'],
+  3: ['r', 't', 'l'],
+  4: ['r', 'tr', 'tl', 'l'],
+  5: ['r', 'tr', 't', 'tl', 'l'],
+  6: ['br', 'r', 'tr', 'tl', 'l', 'bl'],
+  7: RING,
+};
+
+function cardHtml(c) {
+  return `<span class="card${c.red ? ' red' : ''}">` +
+    `<span class="s">${esc(c.suit)}${esc(c.rank)}</span><span class="n">${esc(c.name)}</span></span>`;
+}
+
+function hpHtml(hp, max) {
+  return `<span class="hp">${'♥'.repeat(Math.max(0, hp))}` +
+    `<span class="empty">${'♡'.repeat(Math.max(0, max - hp))}</span></span>`;
+}
+
+function seatHtml(s, self) {
+  const cls = ['seat', s.kingdom];
+  if (s.isCurrent) cls.push('cur');
+  if (!s.alive) cls.push('dead');
+
+  const role = s.roleName
+    ? `<span class="role ${s.role}">${esc(s.roleName)}</span>`
+    : `<span class="role unknown">身份未知</span>`;
+
+  let h = `<div class="${cls.join(' ')}">`;
+  if (s.isCurrent) h += `<span class="badge">${esc(window.__phase || '')}</span>`;
+  h += `<div class="head">` +
+    `<span class="no">${s.seat}号</span>` +
+    `<span class="gen">${esc(s.general)}</span>` +
+    `<span class="kd ${s.kingdom}">${esc(s.kingdomName)}</span>` +
+    role +
+    (s.isViewer ? `<span class="k">(你)</span>` : '') +
+    `</div>`;
+
+  if (!s.alive) {
+    h += `<div class="row muted">阵亡</div></div>`;
+    return h;
+  }
+
+  h += `<div class="row">${hpHtml(s.hp, s.maxHp)}`;
+  if (s.hand) h += `<span class="k">手牌 ${s.handCount}</span>`;
+  else h += `<span class="k"><span class="back"></span>${s.handCount}</span>`;
+  if (s.distance !== null) {
+    h += `<span class="k">距离 ${s.distance}${s.inRange ? ' · 在范围内' : ''}</span>`;
+  }
+  h += `</div>`;
+
+  if (s.knownHand && s.knownHand.length) {
+    h += `<div class="row"><span class="k">已公开</span><span class="cards">` +
+      s.knownHand.map(cardHtml).join('') + `</span></div>`;
+  }
+  if (s.equips.length) {
+    h += `<div class="row"><span class="k">装备</span><span class="cards">` +
+      s.equips.map(e => cardHtml(e.card)).join('') + `</span></div>`;
+  }
+  if (s.judge.length) {
+    h += `<div class="row"><span class="k">判定</span>` +
+      `<span class="judge">${s.judge.map(esc).join(' · ')}</span></div>`;
+  }
+  if (self) {
+    h += `<div class="row"><span class="k">技能</span>` +
+      `<span>${s.skills.map(x => '【' + esc(x) + '】').join(' ')}</span></div>`;
+    h += `<div class="row hand"><span class="k">手牌</span><span class="cards">` +
+      (s.hand && s.hand.length ? s.hand.map(cardHtml).join('') : '<span class="muted">无</span>') +
+      `</span></div>`;
+  }
+  return h + `</div>`;
+}
+
+function logHtml(lines) {
+  return lines.map(l => {
+    let c = '';
+    if (l.startsWith('=====') || l.includes('====')) c = 'rd';
+    else if (l.startsWith('---')) c = 'tn';
+    else if (l.startsWith('☠')) c = 'die';
+    else if (l.includes('点伤害')) c = 'dmg';
+    return c ? `<span class="${c}">${esc(l)}</span>` : esc(l);
+  }).join('\n');
+}
+
+let lastLogLen = -1;
+
+function render(st) {
+  window.__phase = st.phaseName;
+
+  $('hdr').textContent = st.over ? '对局结束'
+    : `第 ${st.round} 轮 · 回合 ${st.turn} · ${st.current !== null ? st.current + '号' : ''} ${st.phaseName}`;
+  $('meta').textContent =
+    (st.viewer !== null ? `视角 ${st.viewer}号  ` : '观战  ') + (st.reveal ? '开图  ' : '');
+
+  // 位置分配:自己在底,其余按 RING 顺序铺开
+  const n = st.seats.length;
+  const viewer = st.viewer === null ? 0 : st.viewer;
+  const slots = RING_BY_COUNT[n - 1] || RING.slice(0, n - 1);
+
+  const table = $('table');
+  // 清掉上一轮生成的框(#me / #mid 是常驻的)
+  [...table.children].forEach(el => { if (el.id !== 'me' && el.id !== 'mid') el.remove(); });
+
+  for (let k = 0; k < n - 1; k++) {
+    const s = st.seats[(viewer + 1 + k) % n];
+    const box = document.createElement('div');
+    box.style.gridArea = slots[k];
+    box.innerHTML = seatHtml(s, false);
+    table.appendChild(box);
+  }
+  $('me').innerHTML = st.viewer === null ? '' : seatHtml(st.seats[viewer], true);
+
+  const log = $('log');
+  if (st.log.length !== lastLogLen) {
+    lastLogLen = st.log.length;
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    log.innerHTML = logHtml(st.log);
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  $('deckinfo').innerHTML =
+    `<span>牌堆 ${st.deck}</span><span>弃牌堆 ${st.discard}</span>`;
+
+  if (st.over) {
+    const names = st.winners.map(w => {
+      const s = st.seats[w];
+      return `${w}号 ${s.general}${s.roleName ? '(' + s.roleName + ')' : ''}`;
+    });
+    $('overtxt').textContent = names.length ? names.join('、') + ' 获胜' : '平局';
+    $('oversub').textContent = st.reason || '';
+    $('over').classList.add('on');
+  }
+}
+
+const es = new EventSource('/events');
+es.onmessage = e => { $('dot').classList.remove('off'); render(JSON.parse(e.data)); };
+es.onerror = () => $('dot').classList.add('off');
+</script>

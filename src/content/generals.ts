@@ -102,7 +102,11 @@ defineGeneral({
         await game.moveCards(chosen, null, 'processing', '鬼才');
         e.card = chosen[0];
         if (game.processing.includes(old)) await game.discardCards([old], '鬼才替换');
-        game.log(`  判定牌被【鬼才】替换为 ${cardLabel(e.card)}`);
+        // 写全:谁发动的、拿什么换、换掉了谁的哪张判定牌 —— 这一行要能独立成立,
+        // 因为发给 LLM 的战报会把上面那条通用的"发动【鬼才】"删掉。
+        // 改判定是推身份的强证据(肯掏牌保谁 / 肯掏牌害谁),不能被精简掉。
+        game.log(`  ${self.name} 用 ${cardLabel(e.card)} 替换 ` +
+          `${e.player.name} 的判定牌 ${cardLabel(old)}(鬼才)`);
       },
     }),
   ],

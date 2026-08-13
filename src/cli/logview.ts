@@ -69,6 +69,33 @@ function pct(sorted: number[], p: number) {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
 }
 
+/**
+ * 身份推理评分。
+ *
+ * **只看终局那张表是没意义的** —— 阵亡的人身份会翻开变成 locked,不再计入,
+ * 于是分母只剩几个幸存者,一局打完往往只剩 1 格。真正要问的是
+ * "它在每一轮的当下猜得准不准",所以按全部历史累计。
+ *
+ * 另外给一个更锐利的指标:每个座位**首次猜对的轮次**。反映的是识破速度,
+ * 而准确率会被"一直猜错但格子多"稀释。
+ */
+export function scoreBeliefs(
+  events: Array<Record<string, any>>, truth: Map<number, string>,
+): { right: number; total: number; firstRight: Map<number, number> } {
+  let right = 0, total = 0;
+  const firstRight = new Map<number, number>();
+  for (const e of events) {
+    for (const r of e.table ?? []) {
+      if (r.locked || r.role === 'unknown') continue;
+      total++;
+      if (r.role !== truth.get(r.seat)) continue;
+      right++;
+      if (!firstRight.has(r.seat)) firstRight.set(r.seat, e.round);
+    }
+  }
+  return { right, total, firstRight };
+}
+
 function main() {
   if (flag('ls') !== undefined) {
     const all = listLogs();
@@ -189,6 +216,50 @@ function main() {
     }
   }
 
+  // ————————————————— 身份推理 —————————————————
+  const beliefs = log.events.filter(e => e.type === 'belief');
+  if (flag('beliefs') !== undefined) {
+    if (!beliefs.length) {
+      console.log(C.dim('\n这局没有身份推理记录(1v1 不需要推身份,或者没接 LLM)'));
+    } else {
+      const truth = new Map<number, string>(
+        (log.setup?.players ?? []).map((p: any) => [p.seat, p.role]));
+      const agents = [...new Set(beliefs.map(e => e.agentId))];
+      for (const id of agents) {
+        console.log(C.bold(`\n身份推理 · ${id}`));
+        const mine = beliefs.filter(e => e.agentId === id);
+        const seats = [...new Set(mine.flatMap(e => (e.table ?? [])
+          .filter((r: any) => !r.locked).map((r: any) => r.seat)))].sort((a, b) => a - b);
+        console.log(C.dim('  ✓猜对  ✗猜错  ?未作答  ·明=已明示(规则给的,不计成绩)'));
+        console.log(C.dim('  轮次  ' + seats.map(s => `P${s}`.padEnd(12)).join('')));
+        for (const e of mine) {
+          const cells = seats.map(s => {
+            const r = (e.table ?? []).find((x: any) => x.seat === s);
+            if (!r || r.role === 'unknown') return C.dim('?'.padEnd(12));
+            // 阵亡翻开之后这格就是规则给的答案,不是它猜的。必须和真·猜对区分开,
+            // 否则表面上一片 ✓,实际上模型什么都没推出来。
+            if (r.locked) return C.dim(`${r.role}·明`.padEnd(12));
+            const ok = r.role === truth.get(s);
+            return (ok ? C.green : C.red)(`${r.role}${ok ? '✓' : '✗'}`.padEnd(12));
+          });
+          console.log(`  R${String(e.round).padEnd(4)} ` + cells.join(''));
+        }
+        const { right, total, firstRight } = scoreBeliefs(mine, truth);
+        console.log(`  ${C.bold('累计准确率')} ${right}/${total}` +
+          (total ? ` (${Math.round(right / total * 100)}%)` : '') +
+          C.dim('   —— 所有轮次所有格子,不是只看终局'));
+        console.log(`  ${C.bold('首次识破')} ` + seats.map(s =>
+          firstRight.has(s) ? C.green(`P${s} R${firstRight.get(s)}`) : C.red(`P${s} 从未`),
+        ).join('  '));
+        console.log(C.dim(`  真相 ${seats.map(s => `P${s}=${truth.get(s)}`).join(' ')}`));
+        for (const r of mine[mine.length - 1].table ?? []) {
+          if (r.locked || !r.why) continue;
+          console.log(C.dim(`    P${r.seat} 依据:${r.why}`));
+        }
+      }
+    }
+  }
+
   // ————————————————— 战报搜索 —————————————————
   const q = flag('grep');
   if (q) {
@@ -210,9 +281,20 @@ function main() {
     for (const line of log.logLines.slice(-k)) console.log('  ' + line);
   }
 
+  if (beliefs.length && flag('beliefs') === undefined) {
+    const truth = new Map<number, string>(
+      (log.setup?.players ?? []).map((p: any) => [p.seat, p.role]));
+    const { right, total, firstRight } = scoreBeliefs(beliefs, truth);
+    console.log(C.bold('\n身份推理') +
+      C.dim(`  ${beliefs.length} 次更新,累计准确率 ${right}/${total}` +
+        (total ? ` (${Math.round(right / total * 100)}%)` : '') +
+        `,识破 ${firstRight.size} 人  —— 明细看 --beliefs`));
+  }
+
   if (flag('decisions') === undefined && !q && tail === undefined && !slowN) {
-    console.log(C.dim('\n看更多:--decisions 决策流水  --slow=5 慢调用  --fallbacks 兜底详情  ' +
-      '--grep=关键词  --tail=40\n重放这一局:npm run replay -- ' + path.basename(file)));
+    console.log(C.dim('\n看更多:--decisions 决策流水  --beliefs 身份推理  --slow=5 慢调用  ' +
+      '--fallbacks 兜底详情  --grep=关键词  --tail=40\n' +
+      '重放这一局:npm run replay -- ' + path.basename(file)));
   }
 }
 

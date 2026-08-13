@@ -15,7 +15,8 @@
     "sim": "tsx src/cli/sim.ts",
     "start": "tsx src/cli/start.ts",
     "test": "tsx --test src/test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ui": "tsx src/cli/ui.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

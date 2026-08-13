@@ -40,7 +40,7 @@ test('距离:座次 + 坐骑 + 马术', async () => {
   assert.equal(game.distance(c, a), 1);
 
   // 给 b 装一匹 +1 马,别人算到他的距离 +1
-  const horse = give(game, b, '绝影', '♠', 5);
+  const horse = give(game, b, '+1马', '♠', 5);
   await game.equipCard(b, horse);
   assert.equal(game.distance(a, b), 2);
   assert.equal(game.distance(b, a), 1);
@@ -269,7 +269,7 @@ test('黄月英奇才:锦囊无距离限制', () => {
 test('装备后牌必须离开手牌,不能同时留在两个区域', async () => {
   const { game } = mkGame({ 0: '孙权', 1: '吕蒙', 2: '甘宁' }, 3);
   const p = game.players[0];
-  const horse = give(game, p, '紫骍', '♦', 13);
+  const horse = give(game, p, '+1马', '♠', 5);
   const other = give(game, p, '杀', '♣', 7);
   assert.equal(p.handCount, 2);
 
@@ -295,7 +295,7 @@ test('通过出牌阶段使用装备牌,同样只会占一份', async () => {
 test('用掉最后一张手牌去装备,也应触发【连营】', async () => {
   const { game, agents } = mkGame({ 0: '陆逊', 1: '吕蒙', 2: '甘宁' }, 3);
   const p = game.players[0];
-  const horse = give(game, p, '赤兔', '♥', 5);
+  const horse = give(game, p, '-1马', '♥', 5);
   agents[0].option = () => 0;   // 陆逊:发动连营
   await game.useCard(game.makeUse(realCard(horse), p, [p]));
   assert.equal(p.handCount, 1, '连营应该补回一张牌');

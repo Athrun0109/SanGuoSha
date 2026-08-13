@@ -29,8 +29,7 @@ export const CARD_CODE: Record<string, string> = {
   诸葛连弩: 'w1', 雌雄双股剑: 'w2', 青釭剑: 'w3', 青龙偃月刀: 'w4',
   丈八蛇矛: 'w5', 贯石斧: 'w6', 方天画戟: 'w7', 麒麟弓: 'w8',
   八卦阵: 'a1', 仁王盾: 'a2',
-  绝影: 'h+', 大宛: 'h+', 紫骍: 'h+',
-  赤兔: 'h-', 的卢: 'h-', 爪黄飞电: 'h-',
+  '+1马': 'h+', '-1马': 'h-',
 };
 
 export class Codec {
@@ -72,11 +71,20 @@ export class Codec {
     return out;
   }
 
-  /** 角色标签 */
+  /** 角色标签。verbose 下带武将名,用于第一次介绍某个角色 */
   player(p: Player, observer?: Player): string {
     const tag = `P${p.seat}`;
     const base = this.mode === 'verbose' ? `${tag}(${p.general.name})` : tag;
     return p === observer ? `${base}*` : base;
+  }
+
+  /**
+   * 只要座位号的短标签。
+   * 交手记录、记牌器这类紧凑表格用它 —— 同一条消息里的角色表已经写明 P0 是谁了,
+   * 每行再重复一遍武将名是纯粹的重复开销(8 人局的交手记录能因此省掉一半以上)。
+   */
+  tag(p: Player, observer?: Player): string {
+    return p === observer ? `P${p.seat}*` : `P${p.seat}`;
   }
 
   cardName(name: string): string {
