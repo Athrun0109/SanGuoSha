@@ -45,6 +45,11 @@ export interface LLMAgentOptions {
   model?: string;
   /** 思考深度。决策频繁、要求响应快,默认 low */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /**
+   * 单次回复的 token 上限。**这是上限不是预留** —— 只按实际生成的 token 计费,
+   * 给小了不省钱,换来的是推理把正文挤空 → 重试 → 三次都失败 → 兜底给规则 AI。
+   * 兜底损害的是打法质量,那个损失不出现在账单上,所以宁可给宽。
+   */
   maxTokens?: number;
   /** verbose 保留武将/卡牌原名;anon 全部代号化(DIY 过技能后建议用 anon) */
   codec?: CodecMode;
@@ -94,6 +99,13 @@ export interface DecisionInfo {
 const PERMANENT_ERROR = /40[134]|凭据|OPENROUTER_API_KEY|ANTHROPIC_API_KEY|not found|No auth|invalid.*key/i;
 /** 正文被推理 token 吃光导致的截断 —— 加大预算重试通常就好了 */
 const TRUNCATED_ERROR = /正文为空|没有文本内容|length/i;
+/**
+ * 反过来:预算超过了这个模型的输出上限,服务端直接拒。
+ * 只在排除了截断之后才判这条 —— 我们自己的截断消息里也带 "max_tokens" 三个字。
+ */
+const OVERSIZE_ERROR = /max_tokens|max_completion_tokens|output token/i;
+/** 截断重试的封顶。再高也没有模型吐得出来,只会白撞一次拒绝 */
+const MAX_BUDGET = 65536;
 
 const DECISION_SCHEMA = {
   type: 'object',
@@ -148,7 +160,7 @@ export class LLMAgent extends ChoiceAgent {
     this.o = {
       model: opts.model ?? 'claude-opus-5',
       effort: opts.effort ?? 'low',
-      maxTokens: opts.maxTokens ?? 8192,
+      maxTokens: opts.maxTokens ?? 32768,
       codec: opts.codec ?? 'verbose',
       historyRounds: opts.historyRounds ?? 10,
       maxLogLines: opts.maxLogLines ?? 40,
@@ -264,7 +276,10 @@ export class LLMAgent extends ChoiceAgent {
         // 凭据/模型名这类错误重试多少次都一样,直接放弃
         if (PERMANENT_ERROR.test(lastErr)) break;
         // 正文被推理 token 挤空了 —— 加大预算再来一次,这是最常见的一种失败
-        if (TRUNCATED_ERROR.test(lastErr)) budget = Math.min(budget * 2, 32000);
+        if (TRUNCATED_ERROR.test(lastErr)) budget = Math.min(budget * 2, MAX_BUDGET);
+        // 预算超出了这个模型的输出上限:往回退。跟着翻倍只会再撞一次同样的拒绝,
+        // 除以 4 是为了在剩下的两次尝试里一定能退到安全区
+        else if (OVERSIZE_ERROR.test(lastErr)) budget = Math.max(Math.floor(budget / 4), 4096);
         if (attempt < 2) {
           // 重试必须让人看见。静默重试 + 长超时 = 看起来像死机。
           game.log(`  ※ ${this.id} 第 ${attempt + 1} 次调用失败(${lastErr}),重试中…`);

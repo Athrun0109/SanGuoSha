@@ -120,9 +120,20 @@ test('OpenRouter:推理 token 数会计入 usage', async () => {
   } finally { globalThis.fetch = orig; }
 });
 
-test('默认 max_tokens 给到 8192 —— 4096 很容易被推理吃光', async () => {
+test('默认 max_tokens 给得宽 —— 它是上限不是预留,给小了只会换来兜底', async () => {
   const r = await oneDecision(() => okJson([0]));
-  assert.equal(r.seen[0].max_tokens, 8192);
+  assert.equal(r.seen[0].max_tokens, 32768);
+  assert.ok(r.seen[0].max_tokens <= 65536, 'deepseek-v4-flash-0731 的输出上限是 65536');
+});
+
+test('预算超出模型上限时往回退,不跟着翻倍再撞一次', async () => {
+  const r = await oneDecision((_p, n) =>
+    (n === 0 ? new Error('OpenRouter 400:{"error":{"message":"max_tokens is too large"}}') : okJson([1])),
+    { maxTokens: 32768 },
+  );
+  assert.equal(r.picked, 1);
+  assert.ok(r.seen[1].max_tokens < r.seen[0].max_tokens,
+    `超限之后应该调小,实际 ${r.seen[0].max_tokens} → ${r.seen[1].max_tokens}`);
 });
 
 // ————————————————— 超时保护 —————————————————

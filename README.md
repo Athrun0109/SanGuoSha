@@ -226,7 +226,7 @@ npm run models              # 常见几家全列出来
 | `deepseek/deepseek-v4-flash` | 2026-04-24 | $0.14/M | $0.28/M | ✓ | 1M |
 | `~deepseek/deepseek-v4-flash-latest` | 滚动别名 | $0.09/M | $0.18/M | ✓ | 1M |
 
-两个坑:不带后缀的 `deepseek-v4-flash` **不是滚动别名**,它钉在四月快照上(OpenRouter 里的显示名就叫「0423」);真正跟着最新版走的是带 `~` 前缀的 `latest`。另外 0731 的 `max_completion_tokens` 是 65536(0423 是 393216),本项目只用 8192,无影响。
+两个坑:不带后缀的 `deepseek-v4-flash` **不是滚动别名**,它钉在四月快照上(OpenRouter 里的显示名就叫「0423」);真正跟着最新版走的是带 `~` 前缀的 `latest`。另外 0731 的 `max_completion_tokens` 是 65536(0423 是 393216),本项目默认用 32768,在上限之内。
 
 **成本**:按下面「实测体积」那节的数字估算,一局约 94k 输入 + 9k 输出 tokens,按 0731 的价格**单局约 $0.010**,$10 大概能打 1000 局。
 
@@ -300,7 +300,11 @@ usage.prompt_tokens   → input_tokens(缓存命中读 prompt_tokens_details.cac
   [llm] 兜底 ← 返回的正文为空(finish_reason=length,推理占了 8000 tokens —— max_tokens 不够)
 ```
 
-`max_tokens` 默认 8192。DeepSeek 这类会先输出一大段 reasoning 的模型,4096 很容易被吃光导致正文为空,可以用 `LLMAgentOptions.maxTokens` 再调大。
+`max_tokens` 默认 **32768**(0731 的输出上限是 65536)。
+
+**它是上限,不是预留** —— 只按实际生成的 token 计费,给小了一分钱不省。给小了换来的是:DeepSeek 这类先吐一大段 reasoning 的模型把正文挤空 → 重试 → 三次都失败 → 兜底给规则 AI。**兜底损害的是打法质量,那个损失不出现在账单上**,所以这里宁可给宽。
+
+两个方向都有保护:正文被推理吃光就翻倍重试(封顶 65536);预算超出模型输出上限被服务端拒了就除以 4 退回来(跟着翻倍只会再撞一次同样的拒绝)。每次尝试的 `maxTokens` 和 `reasoning_tokens` 都记在日志里,`npm run log` 能直接看该给多少。
 
 单次请求超时 **60 秒**,且**一直罩到响应体读完为止** —— 只罩 `fetch()` 是不够的,它在收到响应头时就 resolve 了,服务端随后把 body 卡住就会永远等下去。请求超过 10 秒会每 10 秒打一行 `⏳ 等待模型响应 Ns…`,不至于看起来像死机。
 
