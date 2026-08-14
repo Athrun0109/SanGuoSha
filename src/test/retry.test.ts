@@ -11,7 +11,7 @@ import '../content/generals.js';
 import { createGame } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { LLMAgent, type DecisionInfo, type LLMClient } from '../ai/llmAgent.js';
-import { createOpenRouterClient } from '../ai/openrouterClient.js';
+import { createOpenRouterClient, DEFAULT_TIMEOUT_MS, DEFAULT_PROVIDER } from '../ai/openrouterClient.js';
 
 const okJson = (choice: number[] = [0]) => ({
   content: [{ type: 'text', text: JSON.stringify({ thinking: 'ok', choice }) }],
@@ -91,19 +91,91 @@ test('模型一直给非法编号,也会说明是这个原因', async () => {
   assert.match(r.infos[0].error ?? '', /不合法/);
 });
 
-test('OpenRouter:正文为空且有推理时,报错要点明是 max_tokens 不够', async () => {
+/** 让 fetch 返回一份指定的 OpenRouter 响应 */
+function fakeReply(choice: any, reasoningTokens = 0) {
   const orig = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify({
-    choices: [{ message: { content: '', reasoning: '想了很久…' }, finish_reason: 'length' }],
-    usage: { prompt_tokens: 100, completion_tokens: 8000, completion_tokens_details: { reasoning_tokens: 8000 } },
+    choices: [choice],
+    usage: {
+      prompt_tokens: 100, completion_tokens: reasoningTokens,
+      completion_tokens_details: { reasoning_tokens: reasoningTokens },
+    },
   }), { status: 200 })) as any;
+  return () => { globalThis.fetch = orig; };
+}
+
+test('默认按吞吐路由,并把实际服务的供应商带回来', async () => {
+  // 同一个模型 OpenRouter 会分给多家供应商,实测同一局里单次调用在 20~100 秒之间跳。
+  // 这个项目一局几十次调用,延迟直接决定能不能用,而 flash 本来就便宜 —— 按速度排。
+  assert.deepEqual(DEFAULT_PROVIDER, { sort: 'throughput' });
+
+  let body: any = null;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (_u: any, init: any) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '{"choice":[0]}' }, finish_reason: 'stop' }],
+      usage: {}, provider: 'DeepInfra',
+    }), { status: 200 });
+  }) as any;
+  try {
+    const res = await createOpenRouterClient({ apiKey: 'sk-test' })
+      .messages.create({ model: 'm', max_tokens: 100, messages: [] });
+    assert.deepEqual(body.provider, { sort: 'throughput' }, '路由偏好要真的发出去');
+    assert.equal(res.provider, 'DeepInfra', '哪家服务的要带回来,否则没法对比路由效果');
+
+    // 传 null 就完全交回 OpenRouter 自己的默认路由
+    await createOpenRouterClient({ apiKey: 'sk-test', provider: null })
+      .messages.create({ model: 'm', max_tokens: 100, messages: [] });
+    assert.equal(body.provider, undefined);
+  } finally { globalThis.fetch = orig; }
+});
+
+test('空正文 + finish_reason=length:这是真截断,要点明该加预算', async () => {
+  const restore = fakeReply(
+    { message: { content: '', reasoning: '想了很久…' }, finish_reason: 'length' }, 8000);
   try {
     const client = createOpenRouterClient({ apiKey: 'sk-test' });
     await assert.rejects(
       () => client.messages.create({ model: 'm', max_tokens: 100, messages: [] }),
-      /正文为空[\s\S]*length[\s\S]*8000[\s\S]*max_tokens 不够/,
+      /finish_reason=length[\s\S]*8000[\s\S]*不够/,
     );
-  } finally { globalThis.fetch = orig; }
+  } finally { restore(); }
+});
+
+test('空正文 + finish_reason=null:这是供应商卡住,**不能**报成预算问题', async () => {
+  // 真实案例:等了 100 秒,只出了 1967 个推理 token,finish_reason 是 null。
+  // 以前这里一律报"max_tokens 不够",于是重试逻辑把 32768 翻到 65536 ——
+  // 对一个卡死的供应商毫无用处,还让下一次更慢。诊断错了,补救也跟着错。
+  const restore = fakeReply(
+    { message: { content: '', reasoning: '嗯…' }, finish_reason: null }, 1967);
+  try {
+    const client = createOpenRouterClient({ apiKey: 'sk-test' });
+    await assert.rejects(
+      () => client.messages.create({ model: 'm', max_tokens: 32768, messages: [] }),
+      (e: Error) => {
+        assert.match(e.message, /供应商卡住|掉线/);
+        assert.match(e.message, /1967/);
+        assert.ok(!/max_tokens.*不够/.test(e.message), '不能把它说成预算问题');
+        // 重试逻辑靠这个正则区分两者,别让它误判
+        assert.ok(!/finish_reason=length/.test(e.message));
+        return true;
+      },
+    );
+  } finally { restore(); }
+});
+
+test('回答被塞进 reasoning 而 content 为空时,把它捞回来', async () => {
+  // 有些供应商会这么干。里面有 JSON 就交给上层的 extractJson —— 白捡一次成功
+  const restore = fakeReply({
+    message: { content: '', reasoning: '先想想…{"thinking":"a","choice":[1]}' },
+    finish_reason: null,
+  }, 50);
+  try {
+    const client = createOpenRouterClient({ apiKey: 'sk-test' });
+    const res = await client.messages.create({ model: 'm', max_tokens: 100, messages: [] });
+    assert.match(res.content[0].text ?? '', /"choice":\[1\]/);
+  } finally { restore(); }
 });
 
 test('OpenRouter:推理 token 数会计入 usage', async () => {
@@ -124,6 +196,14 @@ test('默认 max_tokens 给得宽 —— 它是上限不是预留,给小了只�
   const r = await oneDecision(() => okJson([0]));
   assert.equal(r.seen[0].max_tokens, 32768);
   assert.ok(r.seen[0].max_tokens <= 65536, 'deepseek-v4-flash-0731 的输出上限是 65536');
+});
+
+test('超时和 max_tokens 是一对 —— 预算能吐多久,超时就得容多久', async () => {
+  // 非流式请求:模型没生成完一个字节都不会到,所以生成耗时全额计入超时。
+  // 把 maxTokens 从 8192 提到 32768 之后还留着 60s,撞的正是"模型这次话特别多"
+  // 那种情况 —— 也就是最该等一等的情况。两个旋钮必须一起动。
+  assert.ok(DEFAULT_TIMEOUT_MS >= 120_000,
+    `默认超时只有 ${DEFAULT_TIMEOUT_MS / 1000}s,配不上 32768 的 max_tokens`);
 });
 
 test('预算超出模型上限时往回退,不跟着翻倍再撞一次', async () => {

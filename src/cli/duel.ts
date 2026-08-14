@@ -12,6 +12,7 @@
  *   --codec=anon          代号化,屏蔽模型对原版三国杀的先验
  *   --rounds=5            战报只回溯 5 轮
  *   --generals=关羽,吕布    手动点将(留空位表示随机,如 ",吕布")
+ *   --roles=反贼,主公      手动指定身份(默认 0 号位主公)
  *   --handicap=0          关掉后手补牌
  *   --seed=42 --quiet     固定牌局 / 不打印模型的推理
  *   --record              把整局(含每次决策、模型原始响应)记到 logs/,可用 npm run replay 重放
@@ -23,11 +24,12 @@ loadEnv();
 
 import '../content/cards.js';
 import '../content/generals.js';
-import { createGame, parseGeneralSpec, DUEL_HANDICAP } from '../core/setup.js';
+import { createGame, parseGeneralSpec, parseRoleSpec, DUEL_HANDICAP } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { LLMAgent, type DecisionInfo } from '../ai/llmAgent.js';
+import { preflight } from '../ai/preflight.js';
 import { HumanAgent, closeCli } from './humanAgent.js';
-import { ROLE_NAME } from '../core/types.js';
+import { ROLE_NAME, type Role } from '../core/types.js';
 import type { Agent } from '../core/agent.js';
 import type { Player } from '../core/player.js';
 import { Recorder } from '../log/recorder.js';
@@ -59,19 +61,29 @@ async function main() {
   const handicap = handicapArg === undefined ? DUEL_HANDICAP : Number(handicapArg);
 
   let fixedGenerals: Record<number, string> | undefined;
+  let fixedRoles: Record<number, Role> | undefined;
   try {
     fixedGenerals = parseGeneralSpec(flag('generals'), 2);
+    fixedRoles = parseRoleSpec(flag('roles'), 2);
   } catch (e) {
     console.error(e instanceof Error ? e.message : e);
     process.exitCode = 1;
     return;
   }
 
+  // 三条路都给全,而且分清 PowerShell / cmd —— `set X=v` 是 cmd 语法,
+  // 在 PowerShell 里 set 是 Set-Variable 的别名,照抄不报错但也不生效,最难查。
+  const envHint = (name: string, sample: string) =>
+    `  ① 走向导(推荐):npm start —— 输入时不回显,存进 .env,以后免输\n` +
+    `  ② 手动建 .env 文件,写一行:${name}=${sample}\n` +
+    `  ③ 只给当前终端设(关掉就没了):\n` +
+    `       PowerShell  $env:${name}="${sample}"\n` +
+    `       cmd         set ${name}=${sample}\n` +
+    `       Bash        export ${name}=${sample}`;
+
   const credHint = provider === 'openrouter'
-    ? '  Windows:  set OPENROUTER_API_KEY=sk-or-...\n' +
-      '  Bash:     export OPENROUTER_API_KEY=sk-or-...\n' +
-      '  可用模型: npm run models deepseek'
-    : '  set ANTHROPIC_API_KEY=sk-ant-...\n  或安装 ant CLI 后执行 ant auth login';
+    ? envHint('OPENROUTER_API_KEY', 'sk-or-...') + '\n  可用模型:npm run models deepseek'
+    : envHint('ANTHROPIC_API_KEY', 'sk-ant-...') + '\n  或安装 ant CLI 后执行 ant auth login';
 
   let client: any;
   try {
@@ -93,13 +105,9 @@ async function main() {
   }
 
   // 先探一下路:凭据、网络、模型名有问题就立刻失败,而不是整局都在兜底
-  try {
-    await client.messages.create({
-      model, max_tokens: 16,
-      messages: [{ role: 'user', content: '回复 OK' }],
-    });
-  } catch (e) {
-    console.error(`调用 ${provider}(${model})失败:`, e instanceof Error ? e.message : e);
+  const probe = await preflight(client, model);
+  if (!probe.ok) {
+    console.error(`调用 ${provider}(${model})失败:`, probe.error);
     console.error('\n请检查凭据和模型名:\n' + credHint);
     process.exitCode = 1;
     return;
@@ -141,6 +149,7 @@ async function main() {
     playerCount: 2,
     seed,
     fixedGenerals,
+    fixedRoles,
     startingHand,
     log: rec ? rec.logFn(m => console.log(m)) : (m) => console.log(m),
     makeAgent: (p, i): Agent => {
@@ -157,6 +166,7 @@ async function main() {
     rec.start({
       seed, provider, model, effort, codec, historyRounds,
       playerCount: 2, startingHand, handicap, fixedGenerals: fixedGenerals ?? null,
+      fixedRoles: fixedRoles ?? null,
       mode: both ? 'both' : human ? 'human' : 'llm-vs-rule',
     });
     console.log(`\x1b[90m记录中 → ${rec.file}\x1b[0m`);

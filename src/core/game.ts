@@ -301,7 +301,13 @@ export class Game {
     if (!loc) return null;
     const { owner, zone } = loc;
     if (zone === 'hand') owner!.hand.splice(owner!.hand.indexOf(card), 1);
-    else if (zone === 'judge') owner!.judgeZone.splice(owner!.judgeZone.indexOf(card), 1);
+    else if (zone === 'judge') {
+      owner!.judgeZone.splice(owner!.judgeZone.indexOf(card), 1);
+      // "它算什么"这条记录只在判定区里有意义,牌一走就该跟着走。
+      // 留着不会立刻出错(下次进判定区会覆写),但那是颗雷 —— 一张牌换了主人、
+      // 换了身份之后,还挂着上一任的 judgeAs,迟早会有人读到它。
+      delete owner!.judgeAs[card.id];
+    }
     else if (zone === 'equip') {
       for (const slot of Object.keys(owner!.equips) as EquipSlot[]) {
         if (owner!.equips[slot] === card) { this.unequip(owner!, slot); break; }
@@ -468,7 +474,7 @@ export class Game {
       return ask.result;
     }
     const opts = this.enumerateResponses(p, pat, { mode: 'respond', pattern: pat, purpose });
-    if (!opts.length) return null;
+    // 同 askForUse:没有可用的牌也照样问一次,否则"这一步没停顿"本身就泄露了手牌
     const idx = await this.agentOf(p).chooseResponse(this, p, opts, prompt, forced, { purpose, ...ctx });
     if (idx < 0 || idx >= opts.length) return null;
     const vc = opts[idx].card;
@@ -486,7 +492,9 @@ export class Game {
   ): Promise<VirtualCard | null> {
     if (!p.alive) return null;
     const opts = this.enumerateResponses(p, pat, { mode: 'respond', pattern: pat, purpose });
-    if (!opts.length) return null;
+    // 没有可用的牌也照样问一次。**手上没有 ≠ 不问** —— 直接跳过的话,
+    // 旁观者从"这一步没停顿"就能推出这个人没【闪】/没【桃】,是白送的情报。
+    // agent 那边看到空选项会立刻返回 -1(见 ChoiceAgent),所以不花 token。
     const idx = await this.agentOf(p).chooseResponse(this, p, opts, prompt, false, { purpose, ...ctx });
     if (idx < 0 || idx >= opts.length) return null;
     return opts[idx].card;
@@ -551,8 +559,16 @@ export class Game {
 
     for (const t of use.targets) {
       if (!t.alive) continue;
-      // 无懈可击窗口
-      if (spec.type === 'trick' && spec.nullifiable !== false) {
+      /*
+       * 无懈可击窗口。**延时锦囊不在这里开** ——
+       *
+       * 乐不思蜀/闪电"使用"时只是把牌放进判定区,这个过程本身不可被无懈;
+       * 真正的效果在目标的判定阶段,窗口也在那里(见 judgePhase)。
+       * 两边都开就是两个窗口:同一张乐不思蜀能被无懈两次,而且第一次拦下来
+       * 连判定区都进不去 —— 规则上不成立,实战里也少了"先放着、等判定前再抢无懈"
+       * 这层博弈。靠 spec.delayed 认延时锦囊。
+       */
+      if (spec.type === 'trick' && spec.nullifiable !== false && !spec.delayed) {
         if (await this.askForNullification(use, t)) {
           this.log(`  ${vcLabel(use.card)} 对 ${t.name} 的效果被【无懈可击】抵消`);
           continue;
@@ -584,22 +600,37 @@ export class Game {
   async askForNullification(use: CardUseEvent, target: Player | null): Promise<boolean> {
     let negated = false;
     const desc = `${vcLabel(use.card)}${target ? ` 对 ${target.name}` : ''}`;
+    /**
+     * 每一层都跳过**刚出牌的那个人**:之后的层是刚打出【无懈】的人(防自己刷自己)。
+     *
+     * 第一层要不要跳过锦囊使用者,分情况 —— 这里踩过一次:
+     *
+     *  - **单目标锦囊**(顺手牵羊、决斗、乐不思蜀…):跳过。问他"要不要无懈自己
+     *    刚指向别人的牌"几乎永远是浪费,而每问一次就是一次 LLM 调用。
+     *  - **多目标锦囊**(五谷丰登、桃园结义、南蛮、万箭):**不能跳**。
+     *    A 打五谷、然后无懈掉 B 的选牌机会,是完全正常的打法;万箭时无懈救自己
+     *    残血的盟友也是。当初写成无条件跳过,把这类玩法直接删掉了。
+     *  - 不管哪种,**对使用者自己那一份**都跳过(无懈自己的五谷份额没有意义)。
+     */
+    const skipUser = use.targets.length <= 1 || target === use.from;
+    let lastActor: Player | null = skipUser ? use.from : null;
     for (let guard = 0; guard < 30; guard++) {
       let acted = false;
       for (const p of this.playersFrom(this.current)) {
+        if (p === lastActor) continue;
         const pat: CardPattern = { names: ['无懈可击'] };
         const opts = this.enumerateResponses(p, pat, { mode: 'respond', pattern: pat, purpose: 'nullify' });
-        if (!opts.length) continue;
         const prompt = negated
           ? `${desc} 已被无懈,是否再使用【无懈可击】使其恢复效果?`
           : `是否对 ${desc} 使用【无懈可击】?`;
         const idx = await this.agentOf(p).chooseResponse(
           this, p, opts, prompt, false, { purpose: 'nullify', use, target, negated },
         );
-        if (idx < 0) continue;
+        if (idx < 0 || idx >= opts.length) continue;
         const vc = opts[idx].card;
         await this.useCard(this.makeUse(vc, p, []));
         negated = !negated;
+        lastActor = p;
         acted = true;
         break;
       }
@@ -650,6 +681,9 @@ export class Game {
     if (p.hp > 0) { this.log(`  ${p.name} 被救回`); return; }
 
     for (const rescuer of this.playersFrom(this.current)) {
+      // 跳过打出这一下的人 —— 同上,问他"要不要救你刚砍的人"几乎总是浪费。
+      // 但濒死者自己一定要问到(自伤时 source 就是他本人)。
+      if (rescuer === source && rescuer !== p) continue;
       while (p.hp <= 0 && rescuer.alive) {
         const vc = await this.askForUse(
           rescuer, { names: ['桃'] }, 'peach',
@@ -796,6 +830,18 @@ export class Game {
   /** 判定区里一张牌的实际牌名(可能被转化技改写) */
   judgeName(p: Player, card: Card): string {
     return p.judgeAs[card.id] ?? card.name;
+  }
+
+  /**
+   * 判定区那张牌该怎么展示给别人看。
+   *
+   * 判定区是**明置**的,所以"它算什么"和"它实际是什么"都是公开信息。
+   * 大乔用 ♦闪 当乐不思蜀甩出去,别人顺手牵羊拿走的是那张【闪】——
+   * 只显示"乐不思蜀"的话,做这个决定的人根本不知道自己会拿到什么。
+   */
+  judgeLabel(p: Player, card: Card): string {
+    const as = this.judgeName(p, card);
+    return as === card.name ? cardLabel(card) : `${as}(${cardLabel(card)})`;
   }
 
   /** 把一张牌作为延时锦囊放入判定区 */

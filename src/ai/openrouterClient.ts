@@ -22,17 +22,37 @@ export interface OpenRouterOptions {
   /** OpenRouter 用来做应用归因的可选头 */
   appUrl?: string;
   appTitle?: string;
-  /** 单次请求上限(含读响应体)。默认 60s —— 一局要几十次调用,卡太久不如早点失败重试 */
+  /** 单次请求上限(含读响应体)。默认见 DEFAULT_TIMEOUT_MS —— 它和 maxTokens 必须一起调 */
   timeoutMs?: number;
+  /**
+   * 供应商偏好。默认 `{ sort: 'throughput' }` —— 见 DEFAULT_PROVIDER。
+   * 传 null 可以完全关掉,交回 OpenRouter 自己的默认路由。
+   */
+  provider?: Record<string, unknown> | null;
   /** 请求超过 10s 后每 10s 回调一次,用来告诉用户"还在等" */
   onProgress?: (seconds: number) => void;
   /** 打印每次请求的耗时和用量 */
-  onUsage?: (info: { ms: number; usage: Record<string, number>; model: string }) => void;
+  onUsage?: (info: { ms: number; usage: Record<string, number>; model: string; provider?: string }) => void;
 }
 
 const EFFORT_MAP: Record<string, 'low' | 'medium' | 'high'> = {
   low: 'low', medium: 'medium', high: 'high', xhigh: 'high', max: 'high',
 };
+
+/** 见下面 timeoutMs 那段注释:它和 maxTokens 是必须一起动的一对 */
+export const DEFAULT_TIMEOUT_MS = 180_000;
+
+/**
+ * 供应商路由:**按吞吐排序,优先连得快的节点**。
+ *
+ * 同一个模型 OpenRouter 会分发给多家供应商,速度差别很大。实测同一局里
+ * 单次调用在 20~100 秒之间跳,还出现过等 100 秒返回空正文(finish_reason=null)
+ * 的情况 —— 那不是预算问题,是分到了卡住的节点。
+ *
+ * 这个项目一局要几十次调用,延迟直接决定能不能用;而 DeepSeek flash 本来就便宜,
+ * 为速度多付一点完全划算。所以默认按 throughput 排,不按价格。
+ */
+export const DEFAULT_PROVIDER: Record<string, unknown> = { sort: 'throughput' };
 
 export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient {
   const apiKey = opts.apiKey ?? process.env.OPENROUTER_API_KEY;
@@ -40,12 +60,28 @@ export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient 
     throw new Error('没有 OpenRouter 凭据。设置环境变量 OPENROUTER_API_KEY,或在构造时传 apiKey。');
   }
   const baseUrl = (opts.baseUrl ?? 'https://openrouter.ai/api/v1').replace(/\/$/, '');
-  const timeoutMs = opts.timeoutMs ?? 60_000;
+  /**
+   * 这是**非流式**请求 —— 模型没生成完,一个字节都不会到达(`await res.text()`)。
+   * 所以生成耗时全额计入这个超时。
+   *
+   * 它和 `LLMAgentOptions.maxTokens` 是必须一起动的一对旋钮:预算给到 32768,
+   * 模型真吐满就是好几分钟,60 秒必然撞墙 —— 而且撞的正是"模型这次话特别多"
+   * 那种情况,也就是最该等一等的情况。以前预算 8192 时它会被截断、失败得很快,
+   * 提高预算之后失败姿势从"截断"变成了"超时",是同一件事。
+   *
+   * 3 分钟看着很长,但对面是重试(共 3 次)和**兜底给规则 AI** —— 兜底损害的是
+   * 打法质量,那个损失不出现在账单上,所以宁可等。
+   *
+   * 真正的解法是流式:那样就能改成"多久没吐出新 token 才算断",
+   * 把"模型在认真想"和"连接已经死了"区分开。现在这条路只能二选一。
+   */
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const provider = opts.provider === null ? null : (opts.provider ?? DEFAULT_PROVIDER);
 
   return {
     messages: {
       async create(params: any) {
-        const body = toOpenAI(params);
+        const body = toOpenAI({ ...params, provider });
         const ctl = new AbortController();
         // 超时必须一直罩到**读完响应体**为止。
         // 只罩 fetch() 是不够的 —— 它在收到响应头时就 resolve 了,
@@ -101,21 +137,43 @@ export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient 
           reasoning_tokens: reasoningTokens,
         };
 
-        const text = choice.message?.content;
+        let text = choice.message?.content;
         if (typeof text !== 'string' || !text.trim()) {
-          // 最常见的一种失败:带 reasoning 的模型把 max_tokens 全花在思考上,
-          // 正文一个字都没吐出来。说清楚是这种情况,调用方才知道该加预算而不是换模型。
-          const ate = reasoningTokens > 0 || choice.message?.reasoning;
-          throw new Error(
-            `返回的正文为空(finish_reason=${choice.finish_reason}` +
-            (ate ? `,推理占了 ${reasoningTokens || '?'} tokens —— max_tokens 不够` : '') + ')',
-          );
+          /*
+           * 正文为空有**两种完全不同的原因**,别混为一谈:
+           *
+           *  a) finish_reason === 'length' —— 真的截断了,推理把预算吃光,加预算重试有用。
+           *  b) 其它(尤其 null)—— 上游供应商挂了/返回了残缺响应。这跟预算无关,
+           *     加预算不但没用,还会让下一次更慢。
+           *
+           * 这两个曾经共用一句"max_tokens 不够",结果是:一次供应商卡死被报成预算不足,
+           * 重试逻辑还老老实实把预算翻倍。诊断错了,补救也会跟着错。
+           */
+          const salvage = typeof choice.message?.reasoning === 'string'
+            ? choice.message.reasoning.trim() : '';
+          // 有些供应商会把整个回答塞进 reasoning 而 content 留空。
+          // 里面要是有 JSON,上层的 extractJson 能捞出来 —— 白捡一次成功,不试白不试。
+          if (salvage.includes('{') && salvage.includes('}')) {
+            text = salvage;
+          } else if (choice.finish_reason === 'length') {
+            throw new Error(
+              `返回的正文为空(finish_reason=length,推理占了 ${reasoningTokens || '?'} tokens` +
+              ` —— max_tokens(${body.max_tokens})不够,加大预算重试)`);
+          } else {
+            throw new Error(
+              `上游返回了空正文(finish_reason=${choice.finish_reason}` +
+              `,推理 ${reasoningTokens} tokens,耗时 ${Math.round((Date.now() - t0) / 1000)}s)` +
+              ` —— 这不是预算问题,多半是供应商卡住或掉线`);
+          }
         }
-        opts.onUsage?.({ ms: Date.now() - t0, usage, model: json.model ?? body.model });
+        // OpenRouter 会告诉你这次实际是谁服务的。要对比路由改动有没有效,就看这个字段
+        const served = typeof json.provider === 'string' ? json.provider : undefined;
+        opts.onUsage?.({ ms: Date.now() - t0, usage, model: json.model ?? body.model, provider: served });
 
         return {
           content: [{ type: 'text', text }],
           usage,
+          provider: served,
           // OpenAI 系没有 refusal 这个 stop_reason,内容政策拒绝会以 finish_reason 体现
           stop_reason: choice.finish_reason === 'content_filter' ? 'refusal' : choice.finish_reason,
         };
@@ -145,6 +203,9 @@ export function toOpenAI(params: any): Record<string, unknown> {
     messages,
     max_tokens: params.max_tokens,
   };
+
+  // 供应商偏好。OpenRouter 专有字段,别的后端看不懂,所以只在这一层加
+  if (params.provider) out.provider = params.provider;
 
   const schema = params.output_config?.format?.schema;
   if (schema) {

@@ -58,6 +58,9 @@ export abstract class ChoiceAgent implements Agent {
     game: Game, self: Player, options: CardOption[], prompt: string, forced: boolean,
     ctx: ResponseCtx = {},
   ): Promise<number> {
+    // 引擎为了不泄露手牌,没牌的人也会被问一次。这里直接答"不出"就行 ——
+    // 一道只有一个答案的题没必要花一次 API 调用。
+    if (!options.length) return -1;
     const c = this.c(game);
     let q = prompt;
     if (ctx.use) q += `(来源 ${c.player(ctx.use.from)} 的 ${c.cardName(ctx.use.card.name)})`;

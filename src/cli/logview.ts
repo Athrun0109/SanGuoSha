@@ -161,6 +161,21 @@ function main() {
         `重试 ${retries}  ` +
         (fb ? C.red(`兜底 ${fb}`) : C.green('兜底 0')) +
         C.dim(`  输出 ${tok} tokens`));
+
+      // 按供应商拆开 —— 同一个模型不同节点能差好几倍,改了路由之后就靠这个对比
+      const byProv = new Map<string, number[]>();
+      for (const e of list) {
+        for (const a of e.attempts ?? []) {
+          if (!a.provider) continue;
+          if (!byProv.has(a.provider)) byProv.set(a.provider, []);
+          byProv.get(a.provider)!.push(a.ms);
+        }
+      }
+      for (const [prov, arr] of [...byProv].sort((a, b) => b[1].length - a[1].length)) {
+        const sorted = arr.slice().sort((a, b) => a - b);
+        console.log(C.dim(`      via ${prov}: ${arr.length} 次  ` +
+          `中位 ${ms(pct(sorted, 0.5))} / 最慢 ${ms(sorted[sorted.length - 1])}`));
+      }
     }
   }
 
@@ -172,7 +187,10 @@ function main() {
       console.log(`  ${C.dim(`R${e.round}/T${e.turn}`)} [${e.agentId}] ${C.red(e.error ?? '未知')}`);
       console.log(C.dim(`      问题:${e.prompt}`));
       for (const a of e.attempts ?? []) {
-        console.log(C.dim(`      第${a.n}次 ${ms(a.ms)} budget=${a.maxTokens}${a.error ? ' ← ' + a.error : ''}`));
+        console.log(C.dim(`      第${a.n}次 ${ms(a.ms)} budget=${a.maxTokens}` +
+          (a.provider ? ` via ${a.provider}` : '') +
+          (a.usage?.reasoning_tokens ? ` 推理${a.usage.reasoning_tokens}` : '') +
+          (a.error ? ' ← ' + a.error : '')));
       }
       if (flag('fallbacks') !== undefined && e.raw) {
         console.log(C.dim('      原始响应:') + String(e.raw).slice(0, 600));

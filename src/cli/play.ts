@@ -6,6 +6,7 @@
  *   npm run play -- 5 -1                  观战模式(全 AI)
  *   npm run play -- --pick                开局前交互式点将
  *   npm run play -- --generals=关羽,,吕布   直接指定(留空位表示随机)
+ *   npm run play -- --roles=,内奸         指定身份做测试(留空位表示随机)
  *   npm run play -- --seed=42             固定牌局,便于复现
  *   npm run play -- --record              把整局记到 logs/,可用 npm run replay 重放
  */
@@ -15,11 +16,11 @@ loadEnv();
 
 import '../content/cards.js';
 import '../content/generals.js';
-import { createGame, parseGeneralSpec } from '../core/setup.js';
+import { createGame, parseGeneralSpec, parseRoleSpec } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { HumanAgent, closeCli, askLine } from './humanAgent.js';
 import { pickGenerals } from './generals.js';
-import { ROLE_NAME } from '../core/types.js';
+import { ROLE_NAME, type Role } from '../core/types.js';
 import { Recorder } from '../log/recorder.js';
 
 function flag(name: string): string | undefined {
@@ -38,8 +39,10 @@ async function main() {
   const watch = seat < 0 || seat >= n;
 
   let fixedGenerals: Record<number, string> | undefined;
+  let fixedRoles: Record<number, Role> | undefined;
   try {
     fixedGenerals = parseGeneralSpec(flag('generals'), n);
+    fixedRoles = parseRoleSpec(flag('roles'), n);
   } catch (e) {
     console.error(e instanceof Error ? e.message : e);
     process.exit(1);
@@ -63,6 +66,7 @@ async function main() {
     playerCount: n,
     seed,
     fixedGenerals,
+    fixedRoles,
     log: rec ? rec.logFn(m => console.log(m)) : (m) => console.log(m),
     makeAgent: (p, i) => {
       const a = !watch && i === seat ? new HumanAgent('you') : new BasicAI(`ai${i}`);

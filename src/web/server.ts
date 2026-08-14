@@ -19,6 +19,40 @@ import { spawn } from 'node:child_process';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PAGE = path.join(HERE, 'client.html');
 
+/**
+ * API 钩子。返回 true 表示这个请求已经处理掉了。
+ *
+ * 设置页的那些接口(模型列表、写 key、开局)都从这里挂进来 —— 服务端本身
+ * 保持通用,不知道三国杀的任何事,也就不会变成一个什么都往里塞的上帝对象。
+ */
+export type ApiHandler = (
+  req: http.IncomingMessage, res: http.ServerResponse, url: string,
+) => boolean | Promise<boolean>;
+
+/** 读完整个请求体。带上限,免得被一个超长 POST 撑爆内存 */
+export function readBody(req: http.IncomingMessage, limit = 1 << 20): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let n = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => {
+      n += c.length;
+      if (n > limit) { reject(new Error('请求体过大')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+export function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
+  const text = JSON.stringify(body);
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(text);
+}
+
 export interface ViewerServer {
   port: number;
   url: string;
@@ -31,13 +65,32 @@ export interface ViewerServer {
   close(): Promise<void>;
 }
 
-export async function startViewer(opts: { port?: number } = {}): Promise<ViewerServer> {
+export interface ViewerOptions {
+  port?: number;
+  /** 额外的接口。设置页用它挂 /api/*,观战模式不传就只有 / 和 /events */
+  api?: ApiHandler;
+  /** 首页给哪个文件。设置页模式下是 setup.html,棋盘固定在 /board */
+  page?: string;
+}
+
+export async function startViewer(opts: ViewerOptions = {}): Promise<ViewerServer> {
   const conns = new Set<http.ServerResponse>();
   let last: string | null = null;
   let onFirst: (() => void) | null = null;
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = (req.url ?? '/').split('?')[0];
+
+    if (opts.api) {
+      try {
+        if (await opts.api(req, res, url)) return;
+      } catch (e) {
+        // 接口自己抛了 —— 回一句人能看懂的,别把整个服务器带下去
+        if (!res.headersSent) sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+        else try { res.end(); } catch { /* 已经断了 */ }
+        return;
+      }
+    }
 
     if (url === '/events') {
       res.writeHead(200, {
@@ -56,13 +109,13 @@ export async function startViewer(opts: { port?: number } = {}): Promise<ViewerS
       return;
     }
 
+    if (url === '/board') {
+      serveHtml(res, PAGE);
+      return;
+    }
+
     if (url === '/' || url === '/index.html') {
-      // 每次都从磁盘读 —— 改完 client.html 刷新页面即可,不用重启
-      let html: string;
-      try { html = fs.readFileSync(PAGE, 'utf8'); }
-      catch { res.writeHead(500).end('找不到 client.html'); return; }
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(html);
+      serveHtml(res, opts.page ?? PAGE);
       return;
     }
 
@@ -93,6 +146,15 @@ export async function startViewer(opts: { port?: number } = {}): Promise<ViewerS
       return new Promise<void>(resolve => server.close(() => resolve()));
     },
   };
+}
+
+/** 每次都从磁盘读 —— 改完 html 刷新页面即可,不用重启 */
+function serveHtml(res: http.ServerResponse, file: string): void {
+  let html: string;
+  try { html = fs.readFileSync(file, 'utf8'); }
+  catch { res.writeHead(500).end(`找不到 ${path.basename(file)}`); return; }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(html);
 }
 
 /** 端口被占就顺延找下一个,最多试 20 个。传 0 表示随便给一个空闲端口 */

@@ -91,7 +91,12 @@ export function situationBlock(game: Game, self: Player, c: Codec): string {
   for (const p of game.players) {
     if (!p.alive) { lines.push(`${c.player(p, self)} 阵亡 身份${p.role}`); continue; }
     const eq = p.equipCards.map(x => c.cardName(x.name)).join(',') || '-';
-    const jd = p.judgeZone.map(x => c.cardName(game.judgeName(p, x))).join(',') || '-';
+    // 判定区明置:算什么 + 实际是什么都给。顺手牵羊拿走的是实体牌,
+    // 只说"乐不思蜀"的话模型不知道自己会拿到一张【闪】
+    const jd = p.judgeZone.map(x => {
+      const as = c.cardName(game.judgeName(p, x));
+      return game.judgeName(p, x) === x.name ? as : `${as}(${c.card(x)})`;
+    }).join(',') || '-';
     const role = p.revealed ? p.role : (p === self ? p.role : '?');
     const dist = p === self ? '-' : String(game.distance(self, p));
     lines.push(`${c.player(p, self)} ${p.hp}/${p.maxHp} ${p.handCount} ${eq} ${jd} ${role} ${dist}`);

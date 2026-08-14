@@ -12,6 +12,7 @@
  */
 
 import type { Game } from '../core/game.js';
+import type { WebPending } from './webAgent.js';
 import type { Player } from '../core/player.js';
 import {
   cardLabel, KINGDOM_NAME, PHASE_NAME, ROLE_NAME, rankName, suitColor,
@@ -83,6 +84,11 @@ export interface ViewState {
   reason: string;
   /** 视角座位的攻击范围 */
   attackRange: number | null;
+  /**
+   * 轮到视角座位做决策时的题面。**只有 viewer 自己的题才会出现在这里** ——
+   * 由调用方判断归属后传进来(见 SnapshotOptions.pending),这个文件不认识 agent。
+   */
+  pending: WebPending | null;
 }
 
 function cardView(c: Card): CardView {
@@ -100,10 +106,15 @@ export interface SnapshotOptions {
   logTail?: number;
   /** 结束原因,Game 自己不存,由调用方传进来 */
   reason?: string;
+  /**
+   * 待视角座位回答的题。**调用方必须先确认这题是 viewer 的**才能传进来 ——
+   * 传错了就等于把别人的选项(以及从中能反推的手牌)给了这个视角。
+   */
+  pending?: WebPending | null;
 }
 
 export function snapshot(game: Game, opts: SnapshotOptions = {}): ViewState {
-  const { viewer = null, reveal = false, logTail = 200, reason = '' } = opts;
+  const { viewer = null, reveal = false, logTail = 200, reason = '', pending = null } = opts;
   const me = viewer === null ? null : game.players[viewer] ?? null;
 
   const seats = game.players.map((p): SeatView => {
@@ -131,7 +142,8 @@ export function snapshot(game: Game, opts: SnapshotOptions = {}): ViewState {
         const c = p.equips[slot];
         return c ? [{ slot, slotName: SLOT_NAME[slot], card: cardView(c) }] : [];
       }),
-      judge: p.judgeZone.map(c => game.judgeName(p, c)),
+      // 判定区明置,连实体牌一起给 —— 顺手牵羊拿走的是那张实体牌
+      judge: p.judgeZone.map(c => game.judgeLabel(p, c)),
       // 同名技能可能拆成多个对象实现(裸衣 = 少摸一张 + 伤害+1),显示时合并
       skills: [...new Set(p.skills.map(s => s.name))],
       isCurrent: game.current === p && p.alive,
@@ -144,6 +156,8 @@ export function snapshot(game: Game, opts: SnapshotOptions = {}): ViewState {
   return {
     seats,
     viewer,
+    // 纯观战没有"自己",也就不可能有属于自己的决策
+    pending: viewer === null ? null : pending,
     reveal,
     round: game.round,
     turn: game.turnCount,

@@ -1,0 +1,432 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>三国杀 · 开局设置</title>
+<style>
+  /* 和观战页同一套配色,浅色底黑字 */
+  :root {
+    --line: #d4d4d4; --line-soft: #ebebeb;
+    --ink: #111; --ink-dim: #767676;
+    --red: #c0392b; --green: #16a34a; --amber: #b45309;
+    --wei: #2563eb; --shu: #c0392b; --wu: #16a34a; --qun: #a16207;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; min-height: 100%; background: #fff; color: var(--ink);
+    font: 13px/1.6 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  #bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 16px; border-bottom: 1px solid var(--line);
+  }
+  #bar b { font-size: 14px; }
+  #bar .sp { flex: 1; }
+  #wrap {
+    display: grid; grid-template-columns: 260px 1fr; gap: 18px;
+    padding: 16px; max-width: 1100px; margin: 0 auto; align-items: start;
+  }
+  @media (max-width: 820px) { #wrap { grid-template-columns: 1fr; } }
+
+  h3 { margin: 0 0 8px; font-size: 12px; color: var(--ink-dim); font-weight: 600;
+       letter-spacing: .05em; text-transform: uppercase; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 14px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row > label:first-child { width: 72px; color: var(--ink-dim); flex: none; }
+  input, select, button { font: inherit; color: inherit; }
+  input[type=text], input[type=number], input[type=password], select {
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px;
+    background: #fff; min-width: 0; flex: 1;
+  }
+  input:focus, select:focus { outline: 2px solid #2563eb44; border-color: #2563eb; }
+  button {
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px;
+    background: #fafafa; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #f0f0f0; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: #111; color: #fff; border-color: #111; padding: 6px 18px; }
+  button.primary:hover:not(:disabled) { background: #333; }
+
+  /* ——— 席位表 ——— */
+  .seat { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+  .seat-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .seat-no { font-weight: 700; font-size: 15px; width: 30px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; padding: 2px 10px; background: #fff; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.on { background: #111; color: #fff; }
+  .seat-body { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+  .field { display: flex; align-items: center; gap: 5px; }
+  .field > span { color: var(--ink-dim); }
+  .field select, .field input { flex: none; }
+  .llm-only { display: none; }
+  .seat.is-llm .llm-only { display: flex; }
+  .gen { min-width: 110px; text-align: left; }
+  .kd-wei { color: var(--wei); } .kd-shu { color: var(--shu); }
+  .kd-wu  { color: var(--wu);  } .kd-qun { color: var(--qun); }
+
+  /* ——— 武将选择弹层 ——— */
+  #modal {
+    position: fixed; inset: 0; background: #0006; display: none;
+    align-items: center; justify-content: center; padding: 20px; z-index: 9;
+  }
+  #modal.show { display: flex; }
+  #modal .box {
+    background: #fff; border-radius: 8px; max-width: 860px; width: 100%;
+    max-height: 88vh; display: flex; flex-direction: column;
+  }
+  #modal .box > header {
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+  }
+  #glist { overflow: auto; padding: 12px 14px; }
+  .kd-group { margin-bottom: 14px; }
+  .kd-group > h4 { margin: 0 0 6px; font-size: 12px; }
+  .gcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .gcard {
+    border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px;
+    cursor: pointer; background: #fff; text-align: left;
+  }
+  .gcard:hover { border-color: #111; }
+  .gcard.taken { opacity: .35; cursor: not-allowed; }
+  .gcard .n { font-weight: 600; }
+  .gcard .s { color: var(--ink-dim); font-size: 11px;
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+  .hint { color: var(--ink-dim); font-size: 12px; }
+  .err { color: var(--red); white-space: pre-wrap; margin-top: 8px; }
+  .ok { color: var(--green); }
+  code { background: #f3f3f3; padding: 1px 4px; border-radius: 3px; }
+</style>
+
+<div id="bar">
+  <b>三国杀 · 开局设置</b>
+  <span class="sp"></span>
+  <span class="hint" id="tip"></span>
+  <button class="primary" id="go">开始对局 ▶</button>
+</div>
+
+<div id="wrap">
+  <div>
+    <div class="card">
+      <h3>对局</h3>
+      <div class="row"><label>人数</label>
+        <select id="n"></select></div>
+      <div class="row"><label>随机种子</label>
+        <input type="number" id="seed" min="0"><button id="dice" title="换一个">🎲</button></div>
+      <div class="row" id="handicap-row"><label>后手补牌</label>
+        <input type="number" id="handicap" min="0" max="5" style="flex:none;width:60px">
+        <span class="hint">1v1 补偿先手优势</span></div>
+      <div class="row"><label>视角</label>
+        <select id="viewer"></select></div>
+      <div class="row"><label>节奏</label>
+        <input type="number" id="speed" min="0" max="5000" step="100" style="flex:none;width:70px">
+        <span class="hint">毫秒 / 步</span></div>
+      <div class="row"><label>&nbsp;</label>
+        <label><input type="checkbox" id="record"> 记录到 logs/</label></div>
+      <div class="row"><label>&nbsp;</label>
+        <label><input type="checkbox" id="reveal"> 开图(调试用)</label></div>
+    </div>
+
+    <div class="card">
+      <h3>模型凭据 · OpenRouter</h3>
+      <div id="key-state" class="hint">读取中…</div>
+      <div class="row" id="key-input" style="display:none">
+        <input type="password" id="key" placeholder="sk-or-..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="row">
+        <button id="key-save" style="display:none">保存</button>
+        <button id="key-edit" style="display:none">重新输入</button>
+        <button id="preflight">测试连接</button>
+      </div>
+      <div id="key-msg" class="hint"></div>
+      <div class="hint" style="margin-top:6px">
+        只在本机保存到 <code>.env</code>,页面只拿得到掩码。
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <h3>席位 <span class="hint" style="text-transform:none">模型挂在席位上,可以让不同模型对坐</span></h3>
+    <div id="seats"></div>
+    <div id="err" class="err"></div>
+  </div>
+</div>
+
+<div id="modal"><div class="box">
+  <header>
+    <b id="m-title">选择武将</b>
+    <span class="sp" style="flex:1"></span>
+    <button id="m-random">随机</button>
+    <button id="m-close">关闭</button>
+  </header>
+  <div id="glist"></div>
+</div></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+const KD = { wei: '魏', shu: '蜀', wu: '吴', qun: '群' };
+const CONTROLS = [['human', '你'], ['llm', '大模型'], ['rule', '规则AI']];
+
+let GENERALS = [], ROLES = {}, MODELS = [];
+let seats = [];               // 每个席位的配置
+let pickingSeat = -1;         // 武将弹层当前在给谁选
+
+// ————————————————— 席位表 —————————————————
+
+function blankSeat() { return { control: 'rule', general: null, role: null, model: '', effort: 'low', codec: 'verbose' }; }
+
+function resize(n) {
+  while (seats.length < n) seats.push(blankSeat());
+  seats.length = n;
+  // 身份名额会随人数变(3 人局没有忠臣),超出的清掉免得开局才报错
+  const legal = new Set((ROLES[n] || []).map(r => r.id));
+  for (const s of seats) if (s.role && !legal.has(s.role)) s.role = null;
+  renderViewer(n);
+  renderSeats();
+}
+
+function renderSeats() {
+  const box = $('#seats');
+  box.textContent = '';
+  const n = seats.length;
+  const roleOpts = ROLES[n] || [];
+
+  seats.forEach((s, i) => {
+    const card = el('div', 'seat' + (s.control === 'llm' ? ' is-llm' : ''));
+
+    const head = el('div', 'seat-head');
+    head.append(el('span', 'seat-no', 'P' + i));
+    const seg = el('span', 'seg');
+    for (const [id, label] of CONTROLS) {
+      const b = el('button', s.control === id ? 'on' : '', label);
+      b.onclick = () => { s.control = id; if (id === 'llm' && !s.model) s.model = MODELS[0]?.id || ''; renderSeats(); };
+      seg.append(b);
+    }
+    head.append(seg);
+    card.append(head);
+
+    const body = el('div', 'seat-body');
+
+    // 武将
+    const gf = el('span', 'field');
+    gf.append(el('span', null, '武将'));
+    const gb = el('button', 'gen', s.general || '随机');
+    gb.onclick = () => openPicker(i);
+    gf.append(gb);
+    body.append(gf);
+
+    // 身份
+    const rf = el('span', 'field');
+    rf.append(el('span', null, '身份'));
+    const rs = el('select');
+    rs.append(new Option('随机', ''));
+    for (const r of roleOpts) if (!rs.querySelector(`option[value="${r.id}"]`)) rs.append(new Option(r.name, r.id));
+    rs.value = s.role || '';
+    rs.onchange = () => { s.role = rs.value || null; validate(); };
+    rf.append(rs);
+    body.append(rf);
+
+    // 模型(只有 control==='llm' 时显示)
+    const mf = el('span', 'field llm-only');
+    mf.append(el('span', null, '模型'));
+    const ms = el('select');
+    for (const m of MODELS) ms.append(new Option(`${m.id}  $${m.inPrice}/M`, m.id));
+    if (s.model && !MODELS.some(m => m.id === s.model)) ms.append(new Option(s.model, s.model));
+    ms.value = s.model || '';
+    ms.onchange = () => { s.model = ms.value; };
+    mf.append(ms);
+    body.append(mf);
+
+    const ef = el('span', 'field llm-only');
+    ef.append(el('span', null, '思考'));
+    const es = el('select');
+    for (const e of ['low', 'medium', 'high']) es.append(new Option(e, e));
+    es.value = s.effort;
+    es.onchange = () => { s.effort = es.value; };
+    ef.append(es);
+    body.append(ef);
+
+    const cf = el('span', 'field llm-only');
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = s.codec === 'anon';
+    cb.onchange = () => { s.codec = cb.checked ? 'anon' : 'verbose'; };
+    const cl = el('label'); cl.append(cb, document.createTextNode(' 代号化'));
+    cl.title = '屏蔽模型对原版三国杀的先验,DIY 过技能后建议开';
+    cf.append(cl);
+    body.append(cf);
+
+    card.append(body);
+    box.append(card);
+  });
+  validate();
+}
+
+function renderViewer(n) {
+  const v = $('#viewer');
+  const cur = v.value;
+  v.textContent = '';
+  v.append(new Option('纯观战(都盖着)', ''));
+  for (let i = 0; i < n; i++) v.append(new Option(`P${i} 的视角`, String(i)));
+  v.value = (cur !== '' && Number(cur) < n) ? cur : '';
+}
+
+// ————————————————— 武将选择 —————————————————
+
+function openPicker(seat) {
+  pickingSeat = seat;
+  $('#m-title').textContent = `P${seat} 选择武将`;
+  const taken = new Set(seats.map((s, i) => i === seat ? null : s.general).filter(Boolean));
+  const list = $('#glist');
+  list.textContent = '';
+  for (const k of ['wei', 'shu', 'wu', 'qun']) {
+    const mine = GENERALS.filter(g => g.kingdom === k);
+    if (!mine.length) continue;
+    const grp = el('div', 'kd-group');
+    const h = el('h4', 'kd-' + k, KD[k]);
+    grp.append(h);
+    const cards = el('div', 'gcards');
+    for (const g of mine) {
+      const b = el('button', 'gcard' + (taken.has(g.name) ? ' taken' : ''));
+      b.disabled = taken.has(g.name);
+      b.title = g.skills.map(s => `【${s.name}】${s.desc}`).join('\n');
+      b.append(el('div', 'n', `${g.name} ${g.hp}血`));
+      b.append(el('div', 's', g.skills.map(s => s.name).join('、') || '无技能'));
+      b.onclick = () => { seats[seat].general = g.name; closePicker(); renderSeats(); };
+      cards.append(b);
+    }
+    grp.append(cards);
+    list.append(grp);
+  }
+  $('#modal').classList.add('show');
+}
+function closePicker() { $('#modal').classList.remove('show'); pickingSeat = -1; }
+$('#m-close').onclick = closePicker;
+$('#m-random').onclick = () => { if (pickingSeat >= 0) seats[pickingSeat].general = null; closePicker(); renderSeats(); };
+$('#modal').onclick = (e) => { if (e.target.id === 'modal') closePicker(); };
+
+// ————————————————— 校验 / 提交 —————————————————
+
+function collect() {
+  const n = seats.length;
+  const v = $('#viewer').value;
+  return {
+    playerCount: n,
+    seed: Number($('#seed').value) || 0,
+    handicap: n === 2 ? Number($('#handicap').value) : null,
+    viewer: v === '' ? null : Number(v),
+    reveal: $('#reveal').checked,
+    speed: Number($('#speed').value) || 0,
+    record: $('#record').checked,
+    seats: seats.map(s => s.control === 'llm' ? s : { control: s.control, general: s.general, role: s.role }),
+  };
+}
+
+/** 前端只做一件事:把明显不成立的先拦住。真正的判定在服务端 */
+function validate() {
+  const n = seats.length;
+  const legal = ROLES[n] || [];
+  const quota = {};
+  for (const r of legal) quota[r.id] = (quota[r.id] || 0) + 1;
+  const used = {};
+  for (const s of seats) if (s.role) used[s.role] = (used[s.role] || 0) + 1;
+  let msg = '';
+  for (const k of Object.keys(used)) {
+    if (used[k] > (quota[k] || 0)) {
+      const name = (legal.find(r => r.id === k) || {}).name || k;
+      msg = `${name} 指定多了 —— ${n} 人局只有 ${quota[k] || 0} 个`;
+    }
+  }
+  if (!msg && seats.some(s => s.control === 'llm') && !keyReady) msg = '有席位选了大模型,先配置 API key';
+  $('#err').textContent = msg;
+  $('#go').disabled = !!msg;
+  $('#handicap-row').style.display = n === 2 ? '' : 'none';
+  return !msg;
+}
+
+$('#go').onclick = async () => {
+  if (!validate()) return;
+  $('#go').disabled = true;
+  $('#tip').textContent = '开局中…';
+  try {
+    const r = await fetch('/api/start', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(collect()),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '开局失败');
+    location.href = '/board';
+  } catch (e) {
+    $('#err').textContent = String(e.message || e);
+    $('#tip').textContent = '';
+    $('#go').disabled = false;
+  }
+};
+
+// ————————————————— API key —————————————————
+
+let keyReady = false;
+
+function showKey(state) {
+  keyReady = state.configured;
+  $('#key-state').innerHTML = state.configured
+    ? `<span class="ok">● 已配置</span> <code>${state.masked}</code>`
+    : '<span style="color:var(--red)">● 未配置</span> —— 去 openrouter.ai/keys 申请';
+  $('#key-input').style.display = state.configured ? 'none' : '';
+  $('#key-save').style.display = state.configured ? 'none' : '';
+  $('#key-edit').style.display = state.configured ? '' : 'none';
+  validate();
+}
+$('#key-edit').onclick = () => {
+  $('#key-input').style.display = ''; $('#key-save').style.display = '';
+  $('#key-edit').style.display = 'none'; $('#key').value = ''; $('#key').focus();
+};
+$('#key-save').onclick = async () => {
+  const key = $('#key').value.trim();
+  if (!key) return;
+  const r = await fetch('/api/key', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ key }),
+  });
+  const j = await r.json();
+  $('#key').value = '';                       // 输完就从 DOM 里抹掉
+  if (!r.ok) { $('#key-msg').textContent = j.error; return; }
+  $('#key-msg').textContent = '已保存到 .env';
+  showKey(j);
+};
+$('#preflight').onclick = async () => {
+  const model = seats.find(s => s.control === 'llm')?.model || MODELS[0]?.id;
+  if (!model) { $('#key-msg').textContent = '先选一个模型'; return; }
+  $('#key-msg').textContent = `测试 ${model} …`;
+  const r = await fetch('/api/preflight', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+  const j = await r.json();
+  $('#key-msg').innerHTML = j.ok
+    ? `<span class="ok">✓ 连接正常(${j.ms}ms)</span>`
+    : `<span style="color:var(--red)">✗ ${j.error}</span>`;
+};
+
+// ————————————————— 启动 —————————————————
+
+$('#dice').onclick = () => { $('#seed').value = Math.floor(Math.random() * 1e9); };
+$('#n').onchange = () => resize(Number($('#n').value));
+
+(async function init() {
+  for (let i = 2; i <= 8; i++) $('#n').append(new Option(`${i} 人局`, String(i)));
+  $('#n').value = '3';
+  $('#seed').value = Math.floor(Math.random() * 1e9);
+  $('#speed').value = '500';
+  $('#handicap').value = '1';
+
+  const [g, m, k] = await Promise.all([
+    fetch('/api/generals').then(r => r.json()),
+    fetch('/api/models').then(r => r.json()).catch(() => ({ recommended: [] })),
+    fetch('/api/key').then(r => r.json()),
+  ]);
+  GENERALS = g.generals; ROLES = g.roles;
+  MODELS = m.recommended || [];
+  resize(3);
+  showKey(k);
+})();
+</script>

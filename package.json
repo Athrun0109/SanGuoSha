@@ -13,7 +13,7 @@
     "play": "tsx src/cli/play.ts",
     "replay": "tsx src/cli/replay.ts",
     "sim": "tsx src/cli/sim.ts",
-    "start": "tsx src/cli/start.ts",
+    "start": "tsx src/cli/launch.ts",
     "test": "tsx --test src/test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "ui": "tsx src/cli/ui.ts"

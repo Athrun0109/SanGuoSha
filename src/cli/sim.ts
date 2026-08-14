@@ -1,5 +1,8 @@
 /**
- * 批量自动对战:npm run sim [局数] [人数] [--verbose] [--handicap=N]
+ * 批量自动对战:npm run sim [局数] [人数] [--verbose] [--handicap=N] [--roles=...]
+ *
+ * --roles=,内奸 把内奸钉在 1 号位。想集中测某个身份的表现时用 ——
+ * 靠随机开局,8 人局里内奸只有 1/8 的概率落到你想看的那个座位上。
  *
  * --handicap=N 让 0 号位以外的每人多摸 N 张起始牌,用来扫先手优势的补偿力度。
  *
@@ -9,7 +12,7 @@
 
 import '../content/cards.js';
 import '../content/generals.js';
-import { createGame } from '../core/setup.js';
+import { createGame, parseRoleSpec } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { ROLE_NAME, Role } from '../core/types.js';
 
@@ -21,6 +24,14 @@ async function main() {
   const verbose = process.argv.includes('--verbose');
   const hcArg = process.argv.find(a => a.startsWith('--handicap='));
   const handicap = hcArg ? Number(hcArg.split('=')[1]) : undefined;
+  let fixedRoles;
+  try {
+    fixedRoles = parseRoleSpec(process.argv.find(a => a.startsWith('--roles='))?.slice(8), n);
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  }
+
   const startingHand = handicap === undefined ? undefined
     : Array.from({ length: n }, (_, i) => (i === 0 ? 4 : 4 + handicap));
 
@@ -34,6 +45,7 @@ async function main() {
       const game = createGame({
         playerCount: n,
         seed: 1000 + i,
+        fixedRoles,
         startingHand,
         verbose,
         log: verbose ? (m) => console.log(m) : undefined,

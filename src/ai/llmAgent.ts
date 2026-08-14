@@ -36,6 +36,8 @@ export interface LLMClient {
       content: Array<{ type: string; text?: string }>;
       usage?: Record<string, number>;
       stop_reason?: string;
+      /** 这次实际由哪家供应商服务(OpenRouter 特有)。排查延迟时最关键的一个字段 */
+      provider?: string;
     }>;
   };
 }
@@ -87,7 +89,12 @@ export interface DecisionInfo {
   /** 模型返回的原始文本(没解析前的) */
   raw?: string;
   /** 每次尝试的细节:第几次、耗时、用了多少预算、错在哪 */
-  attempts?: Array<{ n: number; ms: number; maxTokens: number; error?: string; usage?: Record<string, number> }>;
+  attempts?: Array<{
+    n: number; ms: number; maxTokens: number; error?: string;
+    usage?: Record<string, number>;
+    /** 实际服务的供应商 —— 同一个模型不同节点能差好几倍,不记下来就查不出来 */
+    provider?: string;
+  }>;
 
   /** 本次生效的身份判断更新(模型没更新时为空) */
   reads?: Read[];
@@ -97,8 +104,14 @@ export interface DecisionInfo {
 
 /** 重试也没用的错误:凭据、模型名、权限 */
 const PERMANENT_ERROR = /40[134]|凭据|OPENROUTER_API_KEY|ANTHROPIC_API_KEY|not found|No auth|invalid.*key/i;
-/** 正文被推理 token 吃光导致的截断 —— 加大预算重试通常就好了 */
-const TRUNCATED_ERROR = /正文为空|没有文本内容|length/i;
+/**
+ * 正文被推理 token 吃光导致的**真截断** —— 加大预算重试通常就好了。
+ *
+ * 注意别写成"只要正文为空就算截断":上游供应商卡住时返回的也是空正文,
+ * 但那跟预算无关,翻倍只会让下一次更慢。客户端已经把两者分开报了,
+ * 这里只认带 `finish_reason=length` 的那种。
+ */
+const TRUNCATED_ERROR = /finish_reason=length|没有文本内容/i;
 /**
  * 反过来:预算超过了这个模型的输出上限,服务端直接拒。
  * 只在排除了截断之后才判这条 —— 我们自己的截断消息里也带 "max_tokens" 三个字。
@@ -253,7 +266,7 @@ export class LLMAgent extends ChoiceAgent {
         const text = res.content.find(b => b.type === 'text')?.text;
         // 原始文本要在解析之前留住:解析失败时,这段就是唯一能看出模型到底说了啥的东西
         if (text) rawText = text;
-        attempts.push({ n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget, usage });
+        attempts.push({ n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget, usage, provider: res.provider });
         if (!text) throw new Error('响应中没有文本内容');
         const parsed = extractJson(text);
         thinking = String(parsed.thinking ?? '');

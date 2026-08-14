@@ -25,7 +25,7 @@ export async function pickCardFrom(
   const zones: { label: string; cards: Card[] }[] = [];
   if (target.hand.length) zones.push({ label: `手牌(${target.hand.length}张,随机一张)`, cards: target.hand });
   for (const c of target.equipCards) zones.push({ label: `装备区 ${c.name}`, cards: [c] });
-  for (const c of target.judgeZone) zones.push({ label: `判定区 ${game.judgeName(target, c)}`, cards: [c] });
+  for (const c of target.judgeZone) zones.push({ label: `判定区 ${game.judgeLabel(target, c)}`, cards: [c] });
   if (!zones.length) return null;
   const idx = await game.agentOf(chooser).chooseOption(game, chooser, zones.map(z => z.label), prompt);
   const z = zones[Math.max(0, Math.min(idx, zones.length - 1))];
@@ -165,7 +165,10 @@ defineCard({
   type: 'trick',
   targetMin: 0,
   targetMax: 0,
-  autoTargets: (g, from) => g.others(from),
+  // 从使用者的下家开始按座次,跳过使用者本人。
+  // 顺序不是摆设:先被点到的人先被问【杀】/【闪】,先结算伤害,
+  // 也就先濒死 —— 谁先死会改变后面还有谁活着能救。
+  autoTargets: (g, from) => g.playersFrom(from, false),
   async onEffect({ game, use, from, to }) {
     const ok = await demandCards(game, to, '杀', 1, 'slash', `南蛮入侵:请打出【杀】`, use);
     if (!ok) await game.damage({ from, to, amount: 1, card: use.card, reason: '南蛮入侵' } as DamageEvent);
@@ -177,7 +180,10 @@ defineCard({
   type: 'trick',
   targetMin: 0,
   targetMax: 0,
-  autoTargets: (g, from) => g.others(from),
+  // 从使用者的下家开始按座次,跳过使用者本人。
+  // 顺序不是摆设:先被点到的人先被问【杀】/【闪】,先结算伤害,
+  // 也就先濒死 —— 谁先死会改变后面还有谁活着能救。
+  autoTargets: (g, from) => g.playersFrom(from, false),
   async onEffect({ game, use, from, to }) {
     const ok = await demandCards(game, to, '闪', 1, 'dodge', `万箭齐发:请打出【闪】`, use);
     if (!ok) await game.damage({ from, to, amount: 1, card: use.card, reason: '万箭齐发' } as DamageEvent);
@@ -189,7 +195,9 @@ defineCard({
   type: 'trick',
   targetMin: 0,
   targetMax: 0,
-  autoTargets: (g) => g.alivePlayers,
+  // 收益牌从**使用者自己**开始按座次 —— 五谷先挑走好牌是使用它的主要理由。
+  // g.alivePlayers 是按座位号排的,不是按行动顺序,用它会让 0 号位永远先挑。
+  autoTargets: (g, from) => g.playersFrom(from, true),
   async onEffect({ game, from, to }) {
     await game.recover(to, 1, from, '桃园结义');
   },
@@ -200,7 +208,9 @@ defineCard({
   type: 'trick',
   targetMin: 0,
   targetMax: 0,
-  autoTargets: (g) => g.alivePlayers,
+  // 收益牌从**使用者自己**开始按座次 —— 五谷先挑走好牌是使用它的主要理由。
+  // g.alivePlayers 是按座位号排的,不是按行动顺序,用它会让 0 号位永远先挑。
+  autoTargets: (g, from) => g.playersFrom(from, true),
   async onEffect({ game, use, to }) {
     if (!use.tags.wugu) {
       const n = game.alivePlayers.length;

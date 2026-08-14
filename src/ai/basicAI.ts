@@ -288,6 +288,9 @@ export class BasicAI implements Agent {
     game: Game, self: Player, options: CardOption[], prompt: string, forced: boolean,
     ctx: ResponseCtx = {},
   ): Promise<number> {
+    // 引擎为了不泄露手牌,没有可用牌的人也会被问一次(见 game.askForUse)。
+    // 没得选就答"不出"。
+    if (!options.length) return -1;
     const cheapest = () => {
       let bi = 0, bv = Infinity;
       options.forEach((o, i) => { const v = vcValue(o.card); if (v < bv) { bv = v; bi = i; } });

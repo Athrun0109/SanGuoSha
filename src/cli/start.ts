@@ -13,6 +13,8 @@ import { LLMAgent, type DecisionInfo } from '../ai/llmAgent.js';
 import { HumanAgent, closeCli, askLine, askSecret } from './humanAgent.js';
 import { pickGenerals } from './generals.js';
 import { loadEnv, saveEnv, ENV_FILE } from './env.js';
+import { fetchModels, pickRecommended, FALLBACK_MODELS, type ModelInfo } from '../ai/modelList.js';
+import { preflight } from '../ai/preflight.js';
 import { ROLE_NAME } from '../core/types.js';
 import type { Agent } from '../core/agent.js';
 import type { Player } from '../core/player.js';
@@ -54,44 +56,8 @@ const mask = (k: string) => (k.length <= 12 ? '*'.repeat(k.length) : `${k.slice(
 
 // —————————————————— 模型选择 ——————————————————
 
-interface ModelInfo { id: string; ctx: number; inPrice: number; outPrice: number; structured: boolean }
-
-/** 兜底清单:拉不到模型列表时用(比如断网) */
-const FALLBACK_MODELS: ModelInfo[] = [
-  { id: 'deepseek/deepseek-v4-flash-0731', ctx: 1048576, inPrice: 0.09, outPrice: 0.18, structured: true },
-  { id: 'deepseek/deepseek-v4-flash', ctx: 1048576, inPrice: 0.14, outPrice: 0.28, structured: true },
-  { id: 'deepseek/deepseek-v4-pro', ctx: 1048576, inPrice: 0.435, outPrice: 0.87, structured: true },
-];
-
-export function pickRecommended(all: ModelInfo[], n = 8): ModelInfo[] {
-  // 只推荐支持 structured_outputs 的 —— 本项目靠它保证模型返回合法 JSON
-  const ok = all.filter(m => m.structured);
-  const deepseek = ok.filter(m => m.id.startsWith('deepseek/')).sort((a, b) => a.inPrice - b.inPrice);
-  const rest = ok.filter(m => !m.id.startsWith('deepseek/')).sort((a, b) => a.inPrice - b.inPrice);
-  const out: ModelInfo[] = [];
-  for (const m of [...deepseek, ...rest]) {
-    if (out.length >= n) break;
-    out.push(m);
-  }
-  return out;
-}
-
-async function fetchModels(): Promise<ModelInfo[]> {
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/models');
-    if (!res.ok) return FALLBACK_MODELS;
-    const data = (await res.json() as any).data ?? [];
-    return data.map((m: any): ModelInfo => ({
-      id: m.id,
-      ctx: m.context_length ?? 0,
-      inPrice: Number(m.pricing?.prompt ?? 0) * 1e6,
-      outPrice: Number(m.pricing?.completion ?? 0) * 1e6,
-      structured: (m.supported_parameters ?? []).includes('structured_outputs'),
-    }));
-  } catch {
-    return FALLBACK_MODELS;
-  }
-}
+// 模型列表和网页设置页共用一份 —— 两边各拉一次迟早会对不上
+export { pickRecommended } from '../ai/modelList.js';
 
 async function setupLLM(): Promise<{ client: any; model: string } | null> {
   console.log('\n—— 大模型设置(OpenRouter)——');
@@ -140,12 +106,12 @@ async function setupLLM(): Promise<{ client: any; model: string } | null> {
   });
 
   process.stdout.write('验证 key 和模型…');
-  try {
-    await client.messages.create({ model, max_tokens: 16, messages: [{ role: 'user', content: '回复 OK' }] });
-    console.log(' ✓');
-  } catch (e) {
+  const probe = await preflight(client, model);
+  if (probe.ok) {
+    console.log(` ✓ (${probe.ms}ms)`);
+  } else {
     console.log(' ✗');
-    console.log(`调用失败:${e instanceof Error ? e.message : e}`);
+    console.log(`调用失败:${probe.error}`);
     if (!await confirm('还是要继续吗?(失败的决策会自动交给规则 AI)', false)) return null;
   }
   return { client, model };

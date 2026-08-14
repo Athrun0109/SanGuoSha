@@ -198,6 +198,9 @@ export class HumanAgent implements Agent {
     game: Game, self: Player, options: CardOption[], prompt: string, forced: boolean,
     ctx?: ResponseCtx,
   ): Promise<number> {
+    // 手上没有可用的牌时不打扰你 —— 一道只有一个答案的题不值得停下来问。
+    // (引擎仍然发起了这次询问,所以旁观者看不出你有没有牌,见 game.askForUse)
+    if (!options.length) return -1;
     const r = await this.choose(game, self, prompt, options.map(o => o.label), forced ? 1 : 0, 1);
     return r.length ? r[0] : -1;
   }
