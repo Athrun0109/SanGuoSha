@@ -90,7 +90,31 @@ export function vcColor(v: VirtualCard): Color {
 
 export function vcLabel(v: VirtualCard): string {
   const base = v.suit === 'none' ? v.name : `${v.name}[${v.suit}${rankName(v.rank)}]`;
-  return v.skill ? `${base}(${v.skill})` : base;
+  if (!v.skill) return base;
+  /*
+   * 多张牌合成一张时,**必须写清用了哪几张**。
+   *
+   * 丈八蛇矛把任意两张手牌当【杀】,4 张手牌就有 C(4,2)=6 个选项。以前它们的标签
+   * 一律是"杀(丈八蛇矛)" —— 一模一样。人在界面上没法选,**模型也只能盲选**:
+   * 它看到 6 个相同的选项,挑哪个纯靠运气,可能把桃和闪拆掉留下两张废牌。
+   *
+   * 单张转化(武圣把♥K当杀)不受影响 —— base 里本来就带着素材的花色点数。
+   */
+  if (!v.cards.length) return `${base}(${v.skill})`;   // 不消耗实体牌的转化技
+  /*
+   * **单张转化也要写清素材是什么牌。**
+   *
+   * 甄姬倾国把一张黑牌当【闪】,以前显示成"闪[♣4](倾国)" —— 花色点数有了,
+   * 但那是**素材的**花色点数,牌名却没说。于是看起来像"一张♣4的闪",而闪全是
+   * 红色的、根本不存在♣4的闪;更糟的是它和场上刚打出的 杀[♣4] 撞了花色点数
+   * (牌堆里 ♣4 有两张:杀 和 过河拆桥),看着就像同一张牌被用了两次。
+   *
+   * 打出去的牌是进弃牌堆明置的,素材本来就是公开信息 —— 不该藏。
+   */
+  const mats = v.cards.length === 1
+    ? v.cards[0].name              // 花色点数已经在 base 里了,补个牌名就够
+    : v.cards.map(cardLabel).join('+');
+  return `${base}(${v.skill}:${mats})`;
 }
 
 /** 响应/求牌时用的匹配条件 */

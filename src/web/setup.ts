@@ -30,35 +30,74 @@ export function maskKey(k: string): string {
   return k.length <= 12 ? '*'.repeat(k.length) : `${k.slice(0, 6)}…${k.slice(-4)}`;
 }
 
-export interface SetupDeps {
+export interface SetupDeps extends SessionDeps {
   /** 用户点「开始对局」时调用。抛错会原样回给页面 */
   onStart: (cfg: GameConfig) => Promise<void> | void;
+}
+
+export interface SessionDeps {
   /** 浏览器提交决策。返回错误说明,或 null 表示收下了 */
   onDecide?: (choice: number[]) => string | null;
+  /**
+   * 重开一局:放弃当前这局,回到能再开一局的状态。
+   * 返回的 go 是让浏览器跳转的地址(设置页那条路要回 `/` 重新配);
+   * 不返回就留在原地等新一局的快照推过来。
+   */
+  onReset?: () => Promise<{ go?: string } | void> | { go?: string } | void;
+  /** 结束进程,等同于命令行里的 Ctrl+C */
+  onQuit?: () => Promise<void> | void;
 }
 
 /**
- * 只有 `/api/decide` 的迷你 handler。
+ * 对局中的控制接口:出牌、重开、结束。
  *
- * `npm run ui` 直接开局,不需要设置页那一堆接口,但要能出牌 —— 所以出牌这块
- * 单独拆出来,两个入口共用同一份校验和错误措辞。
+ * `npm run ui` 直接开局,不需要设置页那一堆接口,但这三样都要 —— 所以单独拆出来,
+ * 两个入口共用同一份校验和错误措辞。
  */
-export function decideApi(onDecide?: (choice: number[]) => string | null): ApiHandler {
+export function sessionApi(deps: SessionDeps): ApiHandler {
   return async (req, res, url) => {
-    if (url !== '/api/decide' || req.method !== 'POST') return false;
-    if (!onDecide) { sendJson(res, 400, { error: '这一局没有网页座位' }); return true; }
-    const body = JSON.parse(await readBody(req) || '{}');
-    if (!Array.isArray(body.choice)) { sendJson(res, 400, { error: 'choice 必须是数组' }); return true; }
-    const err = onDecide(body.choice);
-    if (err) sendJson(res, 400, { error: err });
-    else sendJson(res, 200, { ok: true });
-    return true;
+    if (req.method !== 'POST') return false;
+
+    if (url === '/api/decide') {
+      if (!deps.onDecide) { sendJson(res, 400, { error: '这一局没有网页座位' }); return true; }
+      const body = JSON.parse(await readBody(req) || '{}');
+      if (!Array.isArray(body.choice)) { sendJson(res, 400, { error: 'choice 必须是数组' }); return true; }
+      const err = deps.onDecide(body.choice);
+      if (err) sendJson(res, 400, { error: err });
+      else sendJson(res, 200, { ok: true });
+      return true;
+    }
+
+    if (url === '/api/reset') {
+      if (!deps.onReset) { sendJson(res, 400, { error: '这个入口不支持重开' }); return true; }
+      const r = await deps.onReset();
+      sendJson(res, 200, { ok: true, ...(r ?? {}) });
+      return true;
+    }
+
+    if (url === '/api/quit') {
+      if (!deps.onQuit) { sendJson(res, 400, { error: '这个入口不支持结束进程' }); return true; }
+      // 先把响应发出去再退 —— 不然浏览器只会看到连接被掐断,分不清是退出还是崩了
+      sendJson(res, 200, { ok: true });
+      res.on('finish', () => { void deps.onQuit!(); });
+      return true;
+    }
+
+    return false;
   };
 }
 
 export function setupApi(deps: SetupDeps) {
   let started = false;
-  const decide = decideApi(deps.onDecide);
+  const session = sessionApi({
+    ...deps,
+    // 重开之后要能再开一局,所以这道闸门得跟着放开
+    onReset: deps.onReset && (async () => {
+      const r = await deps.onReset!();
+      started = false;
+      return r ?? { go: '/' };
+    }),
+  });
 
   return async function api(
     req: http.IncomingMessage, res: http.ServerResponse, url: string,
@@ -150,8 +189,8 @@ export function setupApi(deps: SetupDeps) {
       return true;
     }
 
-    // ——— 出牌:浏览器把选中的编号交回来 ———
-    if (await decide(req, res, url)) return true;
+    // ——— 出牌 / 重开 / 结束 ———
+    if (await session(req, res, url)) return true;
 
     sendJson(res, 404, { error: `没有这个接口:${url}` });
     return true;

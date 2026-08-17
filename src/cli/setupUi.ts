@@ -18,7 +18,7 @@ import { createGame } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { LLMAgent } from '../ai/llmAgent.js';
 import { closeCli } from './humanAgent.js';
-import { WebAgent } from '../web/webAgent.js';
+import { GameAborted, WebAgent } from '../web/webAgent.js';
 import { snapshot } from '../web/state.js';
 import { paced } from '../web/paced.js';
 import { openBrowser, startViewer } from '../web/server.js';
@@ -141,19 +141,42 @@ async function run(
     console.log(`  ${a.id}:${a.stats.calls} 次调用,兜底 ${a.stats.fallbacks} 次`);
   }
   if (rec) console.log(`记录 → ${rec.file}`);
-  console.log('页面还开着,Ctrl+C 退出。');
+  console.log('页面还开着。右上角「退出」或结束浮层里可以「再来一局」/「结束游戏」。');
 }
 
 async function main() {
   let view: Awaited<ReturnType<typeof startViewer>>;
   let seat: WebAgent | null = null;
+  let generation = 0;      // 重开一次 +1;旧的那局认出自己过期了就安静收场
   const api = setupApi({
     onStart: async (cfg) => {
+      const mine = ++generation;
       // 不 await:这个请求要立刻回,让页面跳到 /board 去看棋盘,
       // 否则整局跑完才响应,浏览器早超时了
-      run(cfg, view, (a) => { seat = a; }).catch(e => { console.error(e); process.exit(1); });
+      run(cfg, view, (a) => { seat = a; }).catch(e => {
+        // 点了重开导致的中止是正常收场,别当崩溃处理
+        if (e instanceof GameAborted || mine !== generation) return;
+        console.error(e);
+        process.exit(1);
+      });
     },
     onDecide: (choice) => seat ? seat.submit(choice) : '这一局没有网页座位',
+    onReset: () => {
+      generation++;
+      // 必须把挂起的决策兑现掉,否则引擎那条 async 链会永远停在原地
+      seat?.abort();
+      seat = null;
+      console.log('\n已放弃当前对局,回到设置页。');
+      return { go: '/' };
+    },
+    onQuit: async () => {
+      console.log('\n收到网页的结束指令,退出。');
+      // 同 ui.ts:先收干净再退,别在 HTTP 回调里直接 exit
+      seat?.abort();
+      closeCli();
+      await view.close().catch(() => {});
+      setTimeout(() => process.exit(0), 0);
+    },
   });
 
   view = await startViewer({ port: Number(flag('port') ?? 5173), api, page: SETUP_PAGE });

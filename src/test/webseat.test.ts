@@ -149,3 +149,27 @@ test('上一题被短路后,下一题的选项不会跟着丢', async () => {
   web.submit([0]);
   assert.ok(await suit);
 });
+
+// ————————————————— 中止 / 重开 —————————————————
+
+test('中止会把挂起的决策兑现掉,而不是让引擎永远停在那', async () => {
+  const { web, done } = start();
+  await settle();
+  assert.ok(web.pending, '先卡在一个决策上');
+
+  web.abort();
+  assert.equal(web.pending, null, '题面要清掉,否则界面还显示着一局已经不存在的牌');
+  // done 是 setupAndRun().catch(...),中止后它必须能走完 —— 卡住就意味着整局泄漏
+  await done;
+  assert.match(web.submit([0]) ?? '', /中止/, '中止之后再提交要被拒');
+});
+
+test('中止之后不会再接新题', async () => {
+  const { game, web } = start();
+  await settle();
+  web.abort();
+  await assert.rejects(
+    () => web.chooseSuit(game, game.players[0], '反间:请选择一种花色'),
+    (e: Error) => e.name === 'GameAborted',
+  );
+});

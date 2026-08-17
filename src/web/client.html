@@ -189,6 +189,34 @@
 
   #deckinfo { display: flex; gap: 14px; padding: 0 2px; font-size: 12px; color: var(--ink-dim); }
 
+  /* ——— 右上角的退出菜单 ——— */
+  #exit {
+    font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 10px; background: #fff; cursor: pointer;
+  }
+  #exit:hover { background: #f0f0f0; }
+  #menu {
+    display: none; position: fixed; inset: 0; place-items: center;
+    background: rgba(0,0,0,.28); z-index: 20;
+  }
+  #menu.on { display: grid; }
+  #menu .box {
+    background: #fff; border: 1px solid var(--line); border-radius: 8px;
+    padding: 18px 22px; min-width: 250px;
+  }
+  #menu h4 { margin: 0 0 12px; font-size: 14px; }
+  #menu button {
+    display: block; width: 100%; margin-top: 7px;
+    font: inherit; color: inherit; text-align: left;
+    border: 1px solid var(--line); border-radius: 5px;
+    padding: 7px 12px; background: #fff; cursor: pointer;
+  }
+  #menu button:hover { background: #f2f2f2; }
+  #menu button.danger { color: var(--red); border-color: #f0c8c4; }
+  #menu button.danger:hover { background: #fdf2f1; }
+  #menu small { display: block; color: var(--ink-dim); font-size: 11px; font-weight: 400; }
+  #menu .err { color: var(--red); font-size: 12px; margin-top: 9px; }
+
   #over {
     display: none; position: fixed; inset: 0; place-items: center;
     background: rgba(255,255,255,.86);
@@ -199,6 +227,15 @@
     padding: 22px 34px; text-align: center; font-size: 17px;
   }
   #over small { display: block; margin-top: 6px; color: var(--ink-dim); font-size: 12px; }
+  #over-act { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
+  #over-act button {
+    font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 5px;
+    padding: 5px 14px; background: #fff; cursor: pointer;
+  }
+  #over-act button:hover { background: #f2f2f2; }
+  #over-act button.danger { color: var(--red); border-color: #f0c8c4; }
+  #over-act button.danger:hover { background: #fdf2f1; }
+  #over-act.off { display: none; }
 </style>
 
 <div id="bar">
@@ -206,7 +243,16 @@
   <span id="hdr">等待开局…</span>
   <span class="sp"></span>
   <span id="meta"></span>
+  <button id="exit">退出</button>
 </div>
+
+<div id="menu"><div class="box">
+  <h4>退出</h4>
+  <button id="m-back">返回<small>关掉这个菜单,继续这一局</small></button>
+  <button id="m-restart">再来一局<small>放弃当前对局,重新开始</small></button>
+  <button id="m-quit" class="danger">结束游戏<small>关掉服务端进程,等同于命令行里 Ctrl+C</small></button>
+  <div id="m-err" class="err"></div>
+</div></div>
 
 <div id="table">
   <div id="me"></div>
@@ -219,7 +265,14 @@
   </div>
 </div>
 
-<div id="over"><div><span id="overtxt"></span><small id="oversub"></small></div></div>
+<div id="over"><div>
+  <span id="overtxt"></span><small id="oversub"></small>
+  <div id="over-act">
+    <button id="o-back">返回</button>
+    <button id="o-again">再来一局</button>
+    <button id="o-quit" class="danger">结束游戏</button>
+  </div>
+</div></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -247,6 +300,14 @@ let st = null;          // 最新快照
 let sel = [];           // 选中的选项下标
 let errMsg = '';
 let sending = false;
+/**
+ * 组合模式:丈八蛇矛这类"多张素材合成一张"的转化。
+ *
+ * 引擎给的是**枚举好的组合**(4 张手牌 → C(4,2)=6 个选项),直接铺成 6 个按钮
+ * 既占地方又难分辨。这里把它收成三国杀该有的两步:先点武器,再点素材牌,
+ * 凑齐了自动对上其中一个选项。null = 不在组合模式。
+ */
+let combo = null;       // { via: '丈八蛇矛', ids: [卡牌id…] }
 
 const pend = () => (st && st.pending) || null;
 
@@ -279,6 +340,33 @@ function idxOfSkill(name) {
     return it.kind === 'skill' && it.name === name;
   });
 }
+/** via -> 该 via 下所有"多素材"选项的下标。这些不铺按钮,改走两步选择 */
+function comboSources() {
+  const p = pend(); const out = new Map();
+  if (!p) return out;
+  p.options.forEach((_, i) => {
+    const it = itemAt(p, i);
+    if (it.kind !== 'card' || it.ids.length < 2 || !it.via) return;
+    if (!out.has(it.via)) out.set(it.via, []);
+    out.get(it.via).push(i);
+  });
+  return out;
+}
+/** 组合模式下,这张手牌能不能当素材 */
+function comboUsable(cardId) {
+  if (!combo) return false;
+  const p = pend(); if (!p) return false;
+  return comboSources().get(combo.via)?.some(i => itemAt(p, i).ids.includes(cardId)) ?? false;
+}
+/** 当前凑的这几张牌正好等于哪个选项;-1 表示还没凑成 */
+function comboMatch() {
+  if (!combo) return -1;
+  const p = pend(); if (!p) return -1;
+  const key = combo.ids.slice().sort((a, b) => a - b).join(',');
+  return comboSources().get(combo.via)
+    ?.find(i => itemAt(p, i).ids.slice().sort((a, b) => a - b).join(',') === key) ?? -1;
+}
+
 /** 已经能在界面上点到的选项下标 —— 其余的要在按钮区补出来 */
 function clickable() {
   const p = pend(); if (!p) return new Set();
@@ -290,11 +378,37 @@ function clickable() {
   if (meSeat !== null) {
     st.seats[meSeat].skills.forEach(n => { const i = idxOfSkill(n); if (i >= 0) out.add(i); });
   }
+  // 组合选项由"点武器 → 点素材"覆盖,不再铺成一排一模一样的按钮
+  for (const list of comboSources().values()) for (const i of list) out.add(i);
   return out;
+}
+
+/** 点了装备/技能上的"组合源"(丈八蛇矛) */
+function toggleCombo(via) {
+  if (sending) return;
+  combo = (combo && combo.via === via) ? null : { via, ids: [] };
+  sel = []; errMsg = '';
+  render(st);
+}
+
+/** 组合模式下点手牌:加减素材,凑齐就自动对上那个选项 */
+function toggleMaterial(cardId) {
+  if (!combo || sending) return;
+  const at = combo.ids.indexOf(cardId);
+  if (at >= 0) combo.ids.splice(at, 1);
+  else combo.ids.push(cardId);
+  const hit = comboMatch();
+  sel = hit >= 0 ? [hit] : [];
+  errMsg = '';
+  const p = pend();
+  // 凑齐了、而且这题只要一个答案,就直接走 —— 和点单张牌出牌一致
+  if (hit >= 0 && p.min === 1 && p.max === 1) send();
+  else render(st);
 }
 
 function toggle(i) {
   const p = pend(); if (!p || i < 0 || sending) return;
+  combo = null;                    // 点了普通选项就退出组合模式
   const at = sel.indexOf(i);
   if (at >= 0) sel.splice(at, 1);
   else if (p.max === 1) sel = [i];          // 单选:点新的就换掉旧的
@@ -317,7 +431,7 @@ async function send() {
     });
     const j = await r.json();
     if (!r.ok) { errMsg = j.error || '提交失败'; sending = false; render(st); return; }
-    sel = []; errMsg = '';
+    sel = []; combo = null; errMsg = '';
     // 成功之后不用自己重画:引擎会继续跑,下一帧快照自然推过来
   } catch (e) {
     errMsg = String(e.message || e);
@@ -327,15 +441,40 @@ async function send() {
 
 // ————————————————— 渲染 —————————————————
 
-function cardHtml(c, opt) {
-  const i = opt ? idxOfCard(c.id) : -1;
-  const at = sel.indexOf(i);
+/**
+ * mode: 'hand' 自己的手牌(可当选项或组合素材) | 'equip' 自己的装备(可当组合源) | false 只读
+ */
+function cardHtml(c, mode) {
   const cls = ['card'];
   if (c.red) cls.push('red');
-  if (i >= 0) cls.push('pick');
-  if (at >= 0) cls.push('on');
-  const ord = (at >= 0 && pend() && pend().ordered) ? `<span class="ord">${at + 1}</span>` : '';
-  return `<span class="${cls.join(' ')}"${i >= 0 ? ` data-opt="${i}"` : ''}>` +
+  let attr = '', ord = '';
+
+  if (mode === 'equip') {
+    // 装备本身能不能当"组合源"(丈八蛇矛把两张手牌当杀)
+    if (comboSources().has(c.name)) {
+      cls.push('pick');
+      attr = ` data-combo="${esc(c.name)}"`;
+      if (combo && combo.via === c.name) cls.push('on');
+    }
+  } else if (mode === 'hand' && combo) {
+    // 组合模式:手牌当素材
+    if (comboUsable(c.id)) {
+      cls.push('pick');
+      attr = ` data-mat="${c.id}"`;
+      const at = combo.ids.indexOf(c.id);
+      if (at >= 0) { cls.push('on'); ord = `<span class="ord">${at + 1}</span>`; }
+    }
+  } else if (mode === 'hand') {
+    const i = idxOfCard(c.id);
+    const at = sel.indexOf(i);
+    if (i >= 0) cls.push('pick');
+    if (at >= 0) {
+      cls.push('on');
+      if (pend() && pend().ordered) ord = `<span class="ord">${at + 1}</span>`;
+    }
+    if (i >= 0) attr = ` data-opt="${i}"`;
+  }
+  return `<span class="${cls.join(' ')}"${attr}>` +
     ord + `<span class="s">${esc(c.suit)}${esc(c.rank)}</span><span class="n">${esc(c.name)}</span></span>`;
 }
 
@@ -384,7 +523,7 @@ function seatHtml(s, self) {
   }
   if (s.equips.length) {
     h += `<div class="row"><span class="k">装备</span><span class="cards">` +
-      s.equips.map(e => cardHtml(e.card, false)).join('') + `</span></div>`;
+      s.equips.map(e => cardHtml(e.card, self ? 'equip' : false)).join('') + `</span></div>`;
   }
   if (s.judge.length) {
     h += `<div class="row"><span class="k">判定</span>` +
@@ -397,7 +536,7 @@ function seatHtml(s, self) {
       return `<span class="${c.join(' ')}"${si >= 0 ? ` data-opt="${si}"` : ''}>${esc(n)}</span>`;
     }).join(' ') + `</div>`;
     h += `<div class="row hand"><span class="k">手牌</span><span class="cards">` +
-      (s.hand && s.hand.length ? s.hand.map(c => cardHtml(c, true)).join('') : '<span class="muted">无</span>') +
+      (s.hand && s.hand.length ? s.hand.map(c => cardHtml(c, 'hand')).join('') : '<span class="muted">无</span>') +
       `</span></div>`;
   }
   return h + `</div>`;
@@ -415,6 +554,19 @@ function actHtml() {
     : p.min === 0 ? `选 0~${p.max} 个` : `选 ${p.min}~${p.max} 个`;
 
   let h = `<div class="q">${esc(p.question)}</div>`;
+
+  const srcs = comboSources();
+  if (srcs.size) {
+    h += `<div class="opts">` + [...srcs.keys()].map(via =>
+      `<button data-combo="${esc(via)}" class="${combo && combo.via === via ? 'on' : ''}">` +
+      `用【${esc(via)}】</button>`).join('') + `</div>`;
+  }
+  if (combo) {
+    const hit = comboMatch();
+    h += `<div class="cnt" style="margin:0 0 6px">` +
+      `【${esc(combo.via)}】已选 ${combo.ids.length} 张素材` +
+      (hit >= 0 ? ` —— ${esc(p.options[hit])}` : `,点手牌继续选`) + `</div>`;
+  }
   if (rest.length) {
     h += `<div class="opts">` + rest.map(i =>
       `<button data-opt="${i}" class="${sel.includes(i) ? 'on' : ''}">${esc(p.options[i])}</button>`
@@ -441,6 +593,7 @@ function logHtml(lines) {
 }
 
 let lastLogLen = -1;
+let overShown = false;   // 结束浮层弹过没有
 
 function render(state) {
   st = state;
@@ -485,19 +638,25 @@ function render(state) {
   $('logn').textContent = `${st.log.length} 行`;
   $('deckinfo').innerHTML = `<span>牌堆 ${st.deck}</span><span>弃牌堆 ${st.discard}</span>`;
 
-  if (st.over) {
+  if (st.over && !overShown) {
+    overShown = true;               // 只自动弹一次;点了"返回"就别再糊上来
     const names = st.winners.map(w => {
       const s = st.seats[w];
       return `${w}号 ${s.general}${s.roleName ? '(' + s.roleName + ')' : ''}`;
     });
     $('overtxt').textContent = names.length ? names.join('、') + ' 获胜' : '平局';
     $('oversub').textContent = st.reason || '';
+    $('over-act').classList.remove('off');
     $('over').classList.add('on');
   }
 }
 
 // 事件委托:角色框、手牌、技能、按钮都靠 data-opt 认领
 document.addEventListener('click', e => {
+  const src = e.target.closest('[data-combo]');
+  if (src) { toggleCombo(src.dataset.combo); return; }
+  const mat = e.target.closest('[data-mat]');
+  if (mat) { toggleMaterial(Number(mat.dataset.mat)); return; }
   const hit = e.target.closest('[data-opt]');
   if (hit) { toggle(Number(hit.dataset.opt)); return; }
   if (e.target.id === 'go') { send(); return; }
@@ -510,13 +669,65 @@ $('loghd').onclick = () => {
   log.scrollTop = log.scrollHeight;
 };
 
+// ————————————————— 退出菜单 —————————————————
+
+const menu = $('menu');
+const closeMenu = () => { menu.classList.remove('on'); $('m-err').textContent = ''; };
+$('exit').onclick = () => menu.classList.add('on');
+$('m-back').onclick = closeMenu;
+menu.onclick = e => { if (e.target === menu) closeMenu(); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
+async function control(path, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  $('m-err').textContent = '';
+  try {
+    const r = await fetch(path, { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) { $('m-err').textContent = j.error || '操作失败'; return; }
+    return j;
+  } catch (e) {
+    $('m-err').textContent = String(e.message || e);
+  }
+}
+
+/** 再来一局。牌局已经结束时不用再确认 —— 没有什么可放弃的了 */
+async function doAgain() {
+  const j = await control('/api/reset', st && st.over ? null : '放弃当前这一局,重新开始?');
+  if (!j) return;
+  // 设置页那条路要回 / 重新配;npm run ui 直接换个 seed 再来一局,留在原地等新快照
+  if (j.go) { location.href = j.go; return; }
+  overShown = false;
+  $('over').classList.remove('on');
+  closeMenu();
+}
+
+async function doQuit() {
+  const j = await control('/api/quit', '结束游戏并关闭服务端进程?');
+  if (!j) return;
+  closeMenu();
+  $('overtxt').textContent = '游戏已结束';
+  $('oversub').textContent = '服务端进程已退出,可以关掉这个页面了。';
+  $('over-act').classList.add('off');    // 都退了就没什么可点的了
+  $('over').classList.add('on');
+}
+
+$('m-restart').onclick = doAgain;
+$('m-quit').onclick = doQuit;
+$('o-again').onclick = doAgain;
+$('o-quit').onclick = doQuit;
+// 结束浮层的"返回":关掉提示,回去看最终局面。想再叫出来就点右上角「退出」
+$('o-back').onclick = () => $('over').classList.remove('on');
+
 const es = new EventSource('/events');
 es.onmessage = e => {
   $('dot').classList.remove('off');
   const next = JSON.parse(e.data);
   // 换了一道新题就把上一题的选择清掉,免得旧下标落到新选项上
   const before = pend();
-  if (!next.pending || !before || next.pending.question !== before.question) { sel = []; errMsg = ''; }
+  if (!next.pending || !before || next.pending.question !== before.question) {
+    sel = []; combo = null; errMsg = '';
+  }
   render(next);
 };
 es.onerror = () => $('dot').classList.add('off');

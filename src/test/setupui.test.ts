@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import '../content/cards.js';
 import '../content/generals.js';
 import { normalizeConfig, splitFixed, startingHandOf, defaultConfig } from '../web/config.js';
-import { maskKey, setupApi, decideApi } from '../web/setup.js';
+import { maskKey, setupApi, sessionApi } from '../web/setup.js';
 import { preflight } from '../ai/preflight.js';
 import { startViewer } from '../web/server.js';
 
@@ -211,7 +211,7 @@ test('模型席位没配 key 时开局被挡住,而不是整局都在兜底', as
 test('出牌接口可以脱离设置页单独挂 —— npm run ui 用的就是这条', async () => {
   const got: number[][] = [];
   const view = await startViewer({
-    port: 0, api: decideApi(c => { got.push(c); return null; }),
+    port: 0, api: sessionApi({ onDecide: (c: number[]) => { got.push(c); return null; } }),
   });
   try {
     const post = (body: unknown) => fetch(view.url + '/api/decide', {
@@ -226,7 +226,7 @@ test('出牌接口可以脱离设置页单独挂 —— npm run ui 用的就是�
     assert.match((await bad.json() as any).error, /choice 必须是数组/);
 
     // agent 说不行,就把它那句话原样回给页面
-    const view2 = await startViewer({ port: 0, api: decideApi(() => '现在没有轮到你的决策') });
+    const view2 = await startViewer({ port: 0, api: sessionApi({ onDecide: () => '现在没有轮到你的决策' }) });
     const r = await fetch(view2.url + '/api/decide', {
       method: 'POST', body: JSON.stringify({ choice: [0] }),
     });
@@ -237,7 +237,7 @@ test('出牌接口可以脱离设置页单独挂 —— npm run ui 用的就是�
 });
 
 test('没有网页座位时出牌接口明确拒绝,而不是静默吞掉', async () => {
-  const view = await startViewer({ port: 0, api: decideApi(undefined) });
+  const view = await startViewer({ port: 0, api: sessionApi({}) });
   try {
     const r = await fetch(view.url + '/api/decide', {
       method: 'POST', body: JSON.stringify({ choice: [0] }),
@@ -252,5 +252,56 @@ test('设置页和棋盘是两个地址,都能取到', async () => {
   try {
     assert.equal((await fetch(view.url + '/board')).status, 200);
     assert.equal((await fetch(view.url + '/')).status, 200);
+  } finally { await view.close(); }
+});
+
+// ————————————————— 退出菜单的两个动作 —————————————————
+
+test('重开:通知调用方,并把"这局已开始"那道闸门放开', async () => {
+  let resets = 0;
+  const view = await startViewer({
+    port: 0,
+    api: setupApi({ onStart: () => {}, onReset: () => { resets++; } }),
+  });
+  try {
+    const post = (p: string, b?: unknown) => fetch(view.url + p, {
+      method: 'POST', body: b === undefined ? undefined : JSON.stringify(b),
+    });
+    assert.equal((await post('/api/start', base())).status, 200);
+    assert.equal((await post('/api/start', base())).status, 409, '同一局不能开两次');
+
+    const r = await post('/api/reset');
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { ok: true, go: '/' }, '设置页那条路要让浏览器回 /');
+    assert.equal(resets, 1);
+
+    assert.equal((await post('/api/start', base())).status, 200, '重开之后要能再开一局');
+  } finally { await view.close(); }
+});
+
+test('结束:先把响应发完再退进程,否则浏览器只看到连接被掐断', async () => {
+  let quits = 0;
+  const view = await startViewer({
+    port: 0,
+    api: setupApi({ onStart: () => {}, onQuit: () => { quits++; } }),
+  });
+  try {
+    const r = await fetch(view.url + '/api/quit', { method: 'POST' });
+    assert.equal(r.status, 200, '响应要先到');
+    assert.deepEqual(await r.json(), { ok: true });
+    // onQuit 挂在响应写完之后,给它一拍
+    await new Promise(res => setTimeout(res, 30));
+    assert.equal(quits, 1);
+  } finally { await view.close(); }
+});
+
+test('入口没接这两个动作时,明确拒绝而不是静默', async () => {
+  const view = await startViewer({ port: 0, api: sessionApi({}) });
+  try {
+    for (const [path, re] of [['/api/reset', /不支持重开/], ['/api/quit', /不支持结束进程/]] as const) {
+      const r = await fetch(view.url + path, { method: 'POST' });
+      assert.equal(r.status, 400);
+      assert.match((await r.json() as any).error, re);
+    }
   } finally { await view.close(); }
 });

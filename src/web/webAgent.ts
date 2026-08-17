@@ -21,7 +21,9 @@ import type { CodecMode } from '../ai/codec.js';
 
 /** 一个选项背后指向什么实体。前端据此把选项映射到界面上点得到的东西 */
 export type OptionItem =
-  | { kind: 'card'; ids: number[] }
+  /** via:这张虚拟牌是靠哪件装备/技能转化出来的(丈八蛇矛、武圣…)。
+   *  多张素材合成时,界面靠它把 C(n,2) 个选项收成"先点武器、再点牌"两步。 */
+  | { kind: 'card'; ids: number[]; via?: string }
   | { kind: 'player'; seat: number }
   | { kind: 'skill'; name: string }
   | { kind: 'end' }
@@ -37,6 +39,11 @@ export interface WebPending {
   ordered: boolean;
 }
 
+/** 中止当前对局时抛的错。调用方靠它区分"用户点了重开"和"真的崩了" */
+export class GameAborted extends Error {
+  constructor(msg = '对局已中止') { super(msg); this.name = 'GameAborted'; }
+}
+
 export class WebAgent extends ChoiceAgent {
   readonly id: string;
   readonly human = true;
@@ -45,6 +52,8 @@ export class WebAgent extends ChoiceAgent {
 
   pending: WebPending | null = null;
   private resolver: ((choice: number[]) => void) | null = null;
+  private rejecter: ((e: Error) => void) | null = null;
+  private aborted = false;
   /** 由各 chooseXxx 在调 super 之前填好,decide() 取用 */
   private nextItems: OptionItem[] | null = null;
   private nextOrdered = false;
@@ -74,15 +83,31 @@ export class WebAgent extends ChoiceAgent {
     const ordered = this.nextOrdered;
     this.nextItems = null;
     this.nextOrdered = false;
-    return new Promise<number[]>(resolve => {
+    if (this.aborted) return Promise.reject(new GameAborted());
+    return new Promise<number[]>((resolve, reject) => {
       this.pending = { question, options, items, min, max, ordered };
       this.resolver = resolve;
+      this.rejecter = reject;
       this.onPending();
     });
   }
 
+  /**
+   * 放弃这一局。**必须把挂起的 Promise 兑现掉** —— 否则引擎那条 async 链就永远
+   * 停在这里,连同整局状态一起泄漏,而用户以为已经重开了。
+   */
+  abort(reason?: string): void {
+    this.aborted = true;
+    const rej = this.rejecter;
+    this.pending = null;
+    this.resolver = null;
+    this.rejecter = null;
+    rej?.(new GameAborted(reason));
+  }
+
   /** 浏览器交上来的答案。返回错误说明,或 null 表示收下了 */
   submit(choice: number[]): string | null {
+    if (this.aborted) return '这一局已经中止了';
     const p = this.pending;
     if (!p || !this.resolver) return '现在没有轮到你的决策';
     const err = validateChoice(choice, p.options.length, p.min, p.max);
@@ -90,17 +115,20 @@ export class WebAgent extends ChoiceAgent {
     const done = this.resolver;
     this.pending = null;
     this.resolver = null;
+    this.rejecter = null;
     done(choice.map(Number));
     return null;
   }
 
   // ————————— 下面这些只做一件事:记下选项对应的实体,再交给父类 —————————
 
-  private cardIds(c: { cards: Card[] }): number[] { return c.cards.map(x => x.id); }
+  private cardItem(c: { cards: Card[]; skill?: string }): OptionItem {
+    return { kind: 'card', ids: c.cards.map(x => x.id), via: c.skill };
+  }
 
   async choosePlayAction(game: Game, self: Player, actions: PlayAction[]): Promise<number> {
     this.nextItems = actions.map((a): OptionItem =>
-      a.kind === 'card' ? { kind: 'card', ids: this.cardIds(a.card) }
+      a.kind === 'card' ? this.cardItem(a.card)
         : a.kind === 'skill' ? { kind: 'skill', name: a.skill.name }
           : { kind: 'end' });
     return super.choosePlayAction(game, self, actions);
@@ -110,7 +138,7 @@ export class WebAgent extends ChoiceAgent {
     game: Game, self: Player, options: CardOption[], prompt: string, forced: boolean,
     ctx: ResponseCtx = {},
   ): Promise<number> {
-    this.nextItems = options.map((o): OptionItem => ({ kind: 'card', ids: this.cardIds(o.card) }));
+    this.nextItems = options.map((o): OptionItem => this.cardItem(o.card));
     return super.chooseResponse(game, self, options, prompt, forced, ctx);
   }
 
