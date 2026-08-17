@@ -35,19 +35,29 @@ async function armed() {
   return { game, me, opts };
 }
 
-test('多素材组合的标签必须能分辨,不能全叫"杀(丈八蛇矛)"', async () => {
+test('多素材转化只出一条选项 —— 而不是把 C(n,2) 全铺开', async () => {
   const { opts } = await armed();
-  const combos = opts.filter(o => o.card.cards.length > 1);
-  assert.equal(combos.length, 6, '4 张手牌两两组合 = 6 种');
+  const deferred = opts.filter(o => o.pick);
+  assert.equal(deferred.length, 1, `丈八蛇矛只该出一条,实际 ${deferred.length} 条`);
+  assert.equal(deferred[0].label, '杀(丈八蛇矛)', '素材还没定,标签就别写素材');
+  assert.equal(deferred[0].pick!.count, 2);
+  assert.equal(deferred[0].pick!.pool.length, 4, '4 张手牌都能当素材');
 
-  const labels = new Set(combos.map(o => o.label));
-  assert.equal(labels.size, 6, `6 个组合要有 6 个不同的标签,实际只有 ${labels.size} 种`);
-  for (const o of combos) {
-    for (const c of o.card.cards) {
-      assert.ok(o.label.includes(c.name), `标签里要写清素材,缺了 ${c.name}:${o.label}`);
-    }
-  }
-  assert.ok(labels.has('杀(丈八蛇矛:桃[♥8]+闪[♦9])'), [...labels].join(' / '));
+  // 6 张手牌本来会是 C(6,2)=15 条;这里 4 张 → C(4,2)=6 条,现在收成 1 条
+  assert.ok(opts.length <= 3, `选项总数应该很小,实际 ${opts.length}:${opts.map(o => o.label).join(' / ')}`);
+});
+
+test('选中之后才问用哪几张,组装出来的是真牌', async () => {
+  const { game, me, opts } = await armed();
+  const deferred = opts.find(o => o.pick)!;
+  const agent = game.agentOf(me) as any;
+  // 素材问答:挑前两张
+  agent.cards = (cards: any[]) => cards.slice(0, 2);
+  const vc = await game.resolveOption(me, deferred);
+  assert.ok(vc, '应该组装出一张虚拟杀');
+  assert.equal(vc!.name, '杀');
+  assert.equal(vc!.skill, '丈八蛇矛');
+  assert.equal(vc!.cards.length, 2, '真正用掉的是选中的那两张');
 });
 
 test('单张转化不受影响 —— 花色点数本来就在标签里', () => {
@@ -69,7 +79,9 @@ test('真牌不带后缀', () => {
   assert.equal(vcLabel(realCard(c)), '杀[♦J]');
 });
 
-test('组合选项带 via,界面才能收成"先点武器再点牌"', async () => {
+test('素材待定的选项在界面上是个按钮,不映射到具体手牌', async () => {
+  // 点它 → 引擎另外问"用哪几张" → 那一问才对应到手牌。
+  // 界面不该自己去猜组合,否则又回到 15 个一模一样的按钮那个问题
   const { game, me, opts } = await armed();
   const web = new WebAgent('you', () => {});
   game.agents.set(me, web);
@@ -78,14 +90,12 @@ test('组合选项带 via,界面才能收成"先点武器再点牌"', async () =
 
   const p = web.pending!;
   assert.equal(p.items.length, p.options.length);
-  const combos = p.items.filter(it => it.kind === 'card' && it.ids.length > 1);
-  assert.equal(combos.length, 6);
-  for (const it of combos) {
-    assert.equal(it.kind === 'card' && it.via, '丈八蛇矛', 'via 要指明是哪件装备转化的');
-  }
-  // 真牌那个选项没有 via,界面上直接点手牌就行
-  const plain = p.items.find(it => it.kind === 'card' && it.ids.length === 1);
-  assert.equal(plain && plain.kind === 'card' && plain.via, undefined);
+  const deferredAt = p.options.findIndex(o => o === '杀(丈八蛇矛)');
+  assert.ok(deferredAt >= 0, '待定选项要在列表里');
+  assert.equal(p.items[deferredAt].kind, 'plain', '它点不到具体的牌,就是个按钮');
+  // 真牌那条仍然映射到手牌,可以直接点
+  const plain = p.items.find(it => it.kind === 'card');
+  assert.ok(plain && plain.kind === 'card' && plain.ids.length === 1);
 
   web.submit([0]);
   await pr;

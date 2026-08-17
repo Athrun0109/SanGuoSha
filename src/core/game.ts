@@ -8,9 +8,17 @@ import {
   DeathEvent, DrawNumberEvent, DyingEvent, HpEvent, JudgeEvent, MovedCard,
   PhaseEvent, TargetEvent, Timing, Zone, BaseEvent,
 } from './events.js';
-import { Skill, ViewAsContext, limitKey } from './skill.js';
+import { Skill, ViewAsContext, ViewAsSkill, limitKey } from './skill.js';
 import type { Agent, CardOption, PlayAction, ResponseCtx } from './agent.js';
 import { getSpec, cardSpecs } from './registry.js';
+
+/**
+ * 待定素材选项的标签:只说"产出什么 + 靠什么技能",不写具体素材 ——
+ * 因为素材还没定。写成"杀(丈八蛇矛)"就够了,选中之后才问用哪两张。
+ */
+function deferredLabel(rep: VirtualCard): string {
+  return `${rep.name}(${rep.skill})`;
+}
 
 /**
  * 给 agent 用的独立随机流。同一局同一个 agent 拿到的序列是固定的,
@@ -159,8 +167,8 @@ export class Game {
     if (ia < 0 || ib < 0) return Infinity;
     const n = alive.length;
     let d = Math.min((ib - ia + n) % n, (ia - ib + n) % n);
-    d += this.sumQuery(a, 'distanceDelta', { from: a, to: b });      // 马术 / -1马
-    d += this.sumQuery(b, 'distanceFromDelta', { from: a, to: b });  // +1马
+    d += this.sumQuery(a, 'distanceDelta', { from: a, to: b });      // 马术 / 进攻马
+    d += this.sumQuery(b, 'distanceFromDelta', { from: a, to: b });  // 防御马
     return Math.max(1, d);
   }
 
@@ -418,6 +426,46 @@ export class Game {
   }
 
   /** 列出该角色所有能满足 pattern 的出牌方式(含转化技) */
+  /**
+   * 找出第一个合法的素材组合,当作这条待定选项的"代表"。
+   * 它只用来过合法性检查(能不能出、匹不匹配牌型),不代表最终会用哪几张。
+   */
+  private firstCombo(
+    p: Player, s: ViewAsSkill, pool: Card[], ctx: ViewAsContext,
+    ok: (vc: VirtualCard) => boolean,
+  ): VirtualCard | null {
+    const pick: Card[] = [];
+    const walk = (from: number): VirtualCard | null => {
+      if (pick.length === s.cardCount) {
+        const vc = s.viewAs(this, p, [...pick], ctx);
+        return vc && ok(vc) ? vc : null;
+      }
+      for (let i = from; i < pool.length; i++) {
+        if (!s.cardFilter(this, p, pool[i], pick, ctx)) continue;
+        pick.push(pool[i]);
+        const hit = walk(i + 1);
+        pick.pop();
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return walk(0);
+  }
+
+  /**
+   * 把待定选项兑现成一张真的虚拟牌:问用哪几张素材,再交给技能组装。
+   * 没有 pick 的选项原样返回。选不出合法组合时返回 null(等同于放弃)。
+   */
+  async resolveOption(p: Player, opt: CardOption): Promise<VirtualCard | null> {
+    if (!opt.pick) return opt.card;
+    const { skill, count, pool, ctx } = opt.pick;
+    const chosen = await this.agentOf(p).chooseCards(
+      this, p, pool, count, count, `${skill.name}:选择 ${count} 张素材`,
+    );
+    if (chosen.length !== count) return null;
+    return skill.viewAs(this, p, chosen, ctx);
+  }
+
   enumerateResponses(p: Player, pat: CardPattern, ctx: ViewAsContext): CardOption[] {
     const out: CardOption[] = [];
     const seen = new Set<string>();
@@ -445,14 +493,10 @@ export class Game {
           const vc = s.viewAs(this, p, [c], ctx);
           if (vc && this.matchPattern(vc, pat)) push(vc);
         }
-      } else if (s.cardCount === 2) {
-        for (let i = 0; i < pool.length; i++) {
-          for (let j = i + 1; j < pool.length; j++) {
-            if (!s.cardFilter(this, p, pool[j], [pool[i]], ctx)) continue;
-            const vc = s.viewAs(this, p, [pool[i], pool[j]], ctx);
-            if (vc && this.matchPattern(vc, pat)) push(vc);
-          }
-        }
+      } else if (s.cardCount >= 2) {
+        // 只出一条,素材选中之后再问 —— 否则 C(n,2) 会把选项表撑爆(见 PickMaterials)
+        const rep = this.firstCombo(p, s, pool, ctx, vc => this.matchPattern(vc, pat));
+        if (rep) out.push({ card: rep, label: deferredLabel(rep), pick: { skill: s, count: s.cardCount, pool, ctx } });
       }
     }
     return out;
@@ -477,7 +521,9 @@ export class Game {
     // 同 askForUse:没有可用的牌也照样问一次,否则"这一步没停顿"本身就泄露了手牌
     const idx = await this.agentOf(p).chooseResponse(this, p, opts, prompt, forced, { purpose, ...ctx });
     if (idx < 0 || idx >= opts.length) return null;
-    const vc = opts[idx].card;
+    // 多素材转化选中之后才问"用哪几张"
+    const vc = await this.resolveOption(p, opts[idx]);
+    if (!vc) return null;
     await this.moveCards(vc.cards, null, 'processing', `打出${vc.name}`);
     this.log(`  ${p.name} 打出 ${vcLabel(vc)}`);
     if (vc.name === '杀' && this.phase === 'play' && p === this.current) p.addMark('turn:playedSlash');
@@ -497,7 +543,7 @@ export class Game {
     // agent 那边看到空选项会立刻返回 -1(见 ChoiceAgent),所以不花 token。
     const idx = await this.agentOf(p).chooseResponse(this, p, opts, prompt, false, { purpose, ...ctx });
     if (idx < 0 || idx >= opts.length) return null;
-    return opts[idx].card;
+    return this.resolveOption(p, opts[idx]);
   }
 
   /** 要求弃牌 */
@@ -627,7 +673,8 @@ export class Game {
           this, p, opts, prompt, false, { purpose: 'nullify', use, target, negated },
         );
         if (idx < 0 || idx >= opts.length) continue;
-        const vc = opts[idx].card;
+        const vc = await this.resolveOption(p, opts[idx]);
+        if (!vc) continue;
         await this.useCard(this.makeUse(vc, p, []));
         negated = !negated;
         lastActor = p;
@@ -903,11 +950,9 @@ export class Game {
         const vc = s.viewAs(this, p, [], ctx); if (vc) consider(vc);
       } else if (s.cardCount === 1) {
         for (const c of pool) { const vc = s.viewAs(this, p, [c], ctx); if (vc) consider(vc); }
-      } else if (s.cardCount === 2) {
-        for (let i = 0; i < pool.length; i++) for (let j = i + 1; j < pool.length; j++) {
-          if (!s.cardFilter(this, p, pool[j], [pool[i]], ctx)) continue;
-          const vc = s.viewAs(this, p, [pool[i], pool[j]], ctx); if (vc) consider(vc);
-        }
+      } else if (s.cardCount >= 2) {
+        const rep = this.firstCombo(p, s, pool, ctx, vc => cardSpecs.has(vc.name) && this.canUseNow(p, vc));
+        if (rep) out.push({ card: rep, label: deferredLabel(rep), pick: { skill: s, count: s.cardCount, pool, ctx } });
       }
     }
     return out;
@@ -965,7 +1010,9 @@ export class Game {
   private async playPhase(p: Player) {
     for (let guard = 0; guard < 100 && p.alive; guard++) {
       const actions: PlayAction[] = [];
-      for (const o of this.enumerateUsable(p)) actions.push({ kind: 'card', card: o.card, label: o.label });
+      for (const o of this.enumerateUsable(p)) {
+        actions.push({ kind: 'card', card: o.card, label: o.label, pick: o.pick });
+      }
       for (const s of p.allSkills) {
         if (s.kind !== 'active') continue;
         if (!this.skillAvailable(p, s)) continue;
@@ -982,10 +1029,13 @@ export class Game {
         await act.skill.onUse(this, p);
         continue;
       }
-      const targets = await this.selectTargets(p, act.card);
+      // 多素材转化:先问用哪几张,再问目标
+      const vc = await this.resolveOption(p, { card: act.card, label: act.label, pick: act.pick });
+      if (!vc) continue;
+      const targets = await this.selectTargets(p, vc);
       if (targets === null) continue;
-      if (act.card.name === '杀') p.addMark('turn:slashUsed');
-      await this.useCard(this.makeUse(act.card, p, targets));
+      if (vc.name === '杀') p.addMark('turn:slashUsed');
+      await this.useCard(this.makeUse(vc, p, targets));
     }
   }
 
@@ -1005,6 +1055,10 @@ export class Game {
     const chosen = await this.agentOf(p).chooseCards(
       this, p, [...p.hand], excess, excess, `弃牌阶段:请弃置 ${excess} 张手牌`,
     );
+    // 弃了什么是**公开信息**,而且信息量很大(弃了闪 → 这人不缺闪)。
+    // 这条路走的是 chooseCards + discardCards,绕开了 askForDiscard 里那行日志,
+    // 于是战报里只剩"需弃置 2 张"、没有弃了哪两张。
+    if (chosen.length) this.log(`  ${p.name} 弃置 ${chosen.map(cardLabel).join('、')}`);
     await this.discardCards(chosen, '弃牌阶段');
   }
 

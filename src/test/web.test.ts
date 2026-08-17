@@ -210,3 +210,33 @@ test('服务端:端口被占用时自动顺延', async () => {
     } finally { await b.close(); }
   } finally { await a.close(); }
 });
+
+test('战报超过 200 行之后仍然能察觉到更新', async () => {
+  /*
+   * 真实 bug:牌局打到第 10 轮左右,网页上的战报就不再更新了(棋盘其他部分正常)。
+   *
+   * 快照只带最近 200 行,而前端拿 `log.length !== 上次` 判断"有没有新内容" ——
+   * 长度一封顶就永远相等,判断恒为假,战报直接冻住。所以快照要另外给一个
+   * **真实总行数**,那个才是单调增的。
+   */
+  const game = createGame({
+    playerCount: 8, seed: 3, log: () => {},
+    makeAgent: (_p, i) => new BasicAI(`ai${i}`),
+  });
+  const shots: Array<{ total: number; n: number }> = [];
+  const orig = game.log.bind(game);
+  game.log = (m: string) => {
+    orig(m);
+    if (game.logLines.length % 80 === 0) {
+      const s = snapshot(game, { viewer: 0 });
+      shots.push({ total: s.logTotal, n: s.log.length });
+    }
+  };
+  await game.setupAndRun();
+
+  const past = shots.filter(s => s.total > 200);
+  assert.ok(past.length >= 2, '样本要跨过 200 行才说明问题');
+  assert.ok(past.every(s => s.n === 200), 'log 本身确实封顶在 200');
+  assert.equal(new Set(past.map(s => s.total)).size, past.length,
+    'logTotal 必须是单调增的 —— 前端全靠它判断有没有新内容');
+});

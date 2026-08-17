@@ -6,16 +6,37 @@
 import type { Card, VirtualCard } from './types.js';
 import type { Player } from './player.js';
 import type { Game } from './game.js';
-import type { ActiveSkill } from './skill.js';
+import type { ActiveSkill, ViewAsContext, ViewAsSkill } from './skill.js';
 
 export type PlayAction =
-  | { kind: 'card'; card: VirtualCard; label: string }
+  | { kind: 'card'; card: VirtualCard; label: string; pick?: PickMaterials }
   | { kind: 'skill'; skill: ActiveSkill; label: string }
   | { kind: 'end'; label: string };
 
+/**
+ * 多素材转化的"待定素材"。
+ *
+ * 丈八蛇矛把任意两张手牌当【杀】,6 张手牌就是 C(6,2)=15 个选项 —— 铺开之后
+ * 选项列表从 7 条涨到 22 条,而模型要逐条读、逐条评。实测有一次因此烧了
+ * 11,215 个推理 token、等了 109 秒,最后选的还是一张普通装备牌。
+ *
+ * 所以这类转化**只出一条选项**,选中了再问"用哪两张"。常见情况少十几个选项,
+ * 罕见情况(真要用)多一次询问。
+ */
+export interface PickMaterials {
+  skill: ViewAsSkill;
+  /** 要选几张素材 */
+  count: number;
+  /** 可选的素材范围 */
+  pool: Card[];
+  ctx: ViewAsContext;
+}
+
 export interface CardOption {
+  /** 多素材待定时,这里是**其中一种组合**的代表 —— 只用来过合法性检查,不代表最终用哪几张 */
   card: VirtualCard;
   label: string;
+  pick?: PickMaterials;
 }
 
 /** 响应求牌时的上下文,让 AI 能做出有依据的判断 */

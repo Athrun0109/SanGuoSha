@@ -15,11 +15,11 @@ import type { Player } from '../core/player.js';
 import { DECK_TABLE } from '../content/cards.js';
 import { getSpec } from '../core/registry.js';
 
-/** 坐骑按"+1马 / -1马"归组统计 —— 玩家关心的是类型不是马名 */
+/** 坐骑按"防御马 / 进攻马"归组统计 —— 玩家关心的是类型不是马名 */
 export function countGroup(name: string): string {
   const spec = getSpec(name);
-  if (spec.slot === 'horse+1') return '+1马';
-  if (spec.slot === 'horse-1') return '-1马';
+  if (spec.slot === 'horse+1') return '防御马';
+  if (spec.slot === 'horse-1') return '进攻马';
   return name;
 }
 

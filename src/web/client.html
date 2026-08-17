@@ -49,7 +49,18 @@
     grid-area: mid; min-height: 0;
     display: flex; flex-direction: column; justify-content: flex-end; gap: 6px;
   }
-  #me  { grid-area: me; }
+  /*
+   * 底部一整条:左边是自己的信息,右边是操作条。
+   *
+   * 以前 #act 是动态插进 #table 的、又没给 grid-area —— 于是被网格自动塞进第一个
+   * 空格子(左上角)。3 人局看着只是别扭,8 人局那格是别人的座位,会直接撞车。
+   * 现在它固定住在这里:**自己的信息和自己的操作都在同一块面板上**,视线不用来回跑。
+   */
+  #bottom {
+    grid-area: me; display: flex; gap: 10px; align-items: flex-start;
+  }
+  #me  { flex: 1; min-width: 0; }
+  @media (max-width: 900px) { #bottom { flex-direction: column; } }
 
   /* ——— 角色框 ——— */
   .seat {
@@ -66,10 +77,18 @@
   .seat.dead { opacity: .5; }
   .seat.dead .head { text-decoration: line-through; }
 
-  /* 可以点的角色框 */
-  .seat.pick { cursor: pointer; box-shadow: 0 0 0 2px #2563eb33; }
-  .seat.pick:hover { box-shadow: 0 0 0 2px #2563eb88; }
-  .seat.on { box-shadow: 0 0 0 3px var(--sel); background: #eff6ff; }
+  /*
+   * 可以点的角色框。**必须够显眼** —— 这里踩过一次:原来是 20% 不透明度的淡蓝阴影,
+   * 而"当前回合"的琥珀色边框会盖在上面,结果轮到玩家选目标时他以为游戏卡死了。
+   * 操作条里没有按钮的那些题(选目标、选牌),唯一的可点物就是棋盘上这些框。
+   */
+  .seat.pick {
+    cursor: pointer;
+    border-color: var(--sel) !important; border-left-color: var(--sel) !important;
+    box-shadow: 0 0 0 3px #2563eb55;
+  }
+  .seat.pick:hover { background: #eff6ff; box-shadow: 0 0 0 4px #2563eb99; }
+  .seat.on { box-shadow: 0 0 0 4px var(--sel); background: #dbeafe; }
   .seat .ord {
     position: absolute; top: -9px; left: -9px; width: 19px; height: 19px;
     border-radius: 50%; background: var(--sel); color: #fff;
@@ -116,8 +135,8 @@
   .card.red .s { color: var(--red); }
   .cards { display: flex; flex-wrap: wrap; gap: 4px; }
 
-  .card.pick { cursor: pointer; border-color: var(--sel); }
-  .card.pick:hover { background: #eff6ff; }
+  .card.pick { cursor: pointer; border-color: var(--sel); border-width: 2px; background: #f5f9ff; }
+  .card.pick:hover { background: #dbeafe; }
   .card.on { border-color: var(--sel); border-width: 2px; background: #dbeafe; }
   .card .ord {
     position: absolute; top: -8px; left: -8px; width: 17px; height: 17px;
@@ -141,16 +160,18 @@
     border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px;
     background: #fff; font-size: 12px;
   }
-  .skill.pick { cursor: pointer; border-color: var(--sel); }
+  .skill.pick { cursor: pointer; border-color: var(--sel); border-width: 2px; background: #f5f9ff; }
   .skill.pick:hover { background: #eff6ff; }
   .skill.on { border-color: var(--sel); border-width: 2px; background: #dbeafe; }
 
-  /* ——— 操作条 ——— */
+  /* ——— 操作条:贴在自己面板的右边 ——— */
   #act {
     display: none; border: 1px solid var(--sel); border-radius: 6px;
-    background: #eff6ff; padding: 8px 11px; margin-bottom: 8px;
+    background: #eff6ff; padding: 8px 11px;
+    flex: 0 0 clamp(260px, 30%, 400px); align-self: stretch;
   }
   #act.on { display: block; }
+  @media (max-width: 900px) { #act { flex: none; width: 100%; } }
   #act .q { font-weight: 600; margin-bottom: 6px; }
   #act .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   #act button {
@@ -164,6 +185,10 @@
   #act .go:hover:not(:disabled) { background: #333; }
   #act .cnt { color: var(--ink-dim); font-size: 12px; margin-left: 8px; }
   #act .err { color: var(--red); font-size: 12px; margin-top: 5px; }
+  #act .where {
+    font-size: 12px; color: var(--sel); margin-bottom: 6px;
+    border-left: 3px solid var(--sel); padding-left: 7px;
+  }
 
   /* ——— 战报:默认只露最近几行,点 ▼ 展开 ——— */
   #logbox { border: 1px solid var(--line-soft); border-radius: 6px; background: #fafafa; }
@@ -186,6 +211,21 @@
   #log .tn { color: var(--wei); }
   #log .dmg { color: var(--red); }
   #log .die { color: var(--red); font-weight: 600; }
+
+  /*
+   * 中央牌堆:一道题的候选**本身就是牌**时(五谷丰登、观星),摊在中间给你看,
+   * 而不是铺成一排文字按钮 —— 你是在挑牌,就该看见牌。
+   *
+   * 只画**不在你手上**的那些。手牌在下面的面板里本来就点得到,画两遍反而乱。
+   */
+  #tray {
+    display: none; border: 1px solid var(--sel); border-radius: 6px;
+    background: #eff6ff; padding: 9px 11px; margin-bottom: 6px;
+  }
+  #tray.on { display: block; }
+  #tray .t { font-size: 12px; color: var(--sel); margin-bottom: 7px; }
+  #tray .cards { gap: 7px; }
+  #tray .card { font-size: 14px; padding: 6px 10px; }
 
   #deckinfo { display: flex; gap: 14px; padding: 0 2px; font-size: 12px; color: var(--ink-dim); }
 
@@ -255,8 +295,12 @@
 </div></div>
 
 <div id="table">
-  <div id="me"></div>
+  <div id="bottom">
+    <div id="me"></div>
+    <div id="act"></div>
+  </div>
   <div id="mid">
+    <div id="tray"></div>
     <div id="logbox">
       <div id="loghd"><span id="caret">▼</span><span>战报</span><span class="sp"></span><span id="logn"></span></div>
       <div id="log"></div>
@@ -300,14 +344,6 @@ let st = null;          // 最新快照
 let sel = [];           // 选中的选项下标
 let errMsg = '';
 let sending = false;
-/**
- * 组合模式:丈八蛇矛这类"多张素材合成一张"的转化。
- *
- * 引擎给的是**枚举好的组合**(4 张手牌 → C(4,2)=6 个选项),直接铺成 6 个按钮
- * 既占地方又难分辨。这里把它收成三国杀该有的两步:先点武器,再点素材牌,
- * 凑齐了自动对上其中一个选项。null = 不在组合模式。
- */
-let combo = null;       // { via: '丈八蛇矛', ids: [卡牌id…] }
 
 const pend = () => (st && st.pending) || null;
 
@@ -340,31 +376,36 @@ function idxOfSkill(name) {
     return it.kind === 'skill' && it.name === name;
   });
 }
-/** via -> 该 via 下所有"多素材"选项的下标。这些不铺按钮,改走两步选择 */
-function comboSources() {
-  const p = pend(); const out = new Map();
-  if (!p) return out;
+/**
+ * 该摊在中央牌堆里的选项:候选**本身是一张牌**、而且**不在我手上**。
+ * 五谷丰登的候选、观星的牌堆顶都属于这类;弃牌选的是自己的手牌,那在下面的面板里点。
+ */
+function trayOptions() {
+  const p = pend(); if (!p) return [];
+  const meSeat = st.viewer;
+  const mine = new Set(meSeat === null ? [] : (st.seats[meSeat].hand || []).map(c => c.id));
+  const out = [];
   p.options.forEach((_, i) => {
     const it = itemAt(p, i);
-    if (it.kind !== 'card' || it.ids.length < 2 || !it.via) return;
-    if (!out.has(it.via)) out.set(it.via, []);
-    out.get(it.via).push(i);
+    if (it.kind !== 'card' || !it.ids.length) return;
+    if (it.ids.some(id => mine.has(id))) return;      // 自己的手牌不进牌堆
+    out.push(i);
   });
   return out;
 }
-/** 组合模式下,这张手牌能不能当素材 */
-function comboUsable(cardId) {
-  if (!combo) return false;
-  const p = pend(); if (!p) return false;
-  return comboSources().get(combo.via)?.some(i => itemAt(p, i).ids.includes(cardId)) ?? false;
-}
-/** 当前凑的这几张牌正好等于哪个选项;-1 表示还没凑成 */
-function comboMatch() {
-  if (!combo) return -1;
-  const p = pend(); if (!p) return -1;
-  const key = combo.ids.slice().sort((a, b) => a - b).join(',');
-  return comboSources().get(combo.via)
-    ?.find(i => itemAt(p, i).ids.slice().sort((a, b) => a - b).join(',') === key) ?? -1;
+
+/** 从选项文本里抠出花色点数,好把红牌画成红的 */
+function chipHtml(label, i) {
+  const m = label.match(/^(.*?)\[([♠♥♣♦])(\S+?)\]/);
+  const at = sel.indexOf(i);
+  const cls = ['card', 'pick'];
+  if (m && (m[2] === '♥' || m[2] === '♦')) cls.push('red');
+  if (at >= 0) cls.push('on');
+  const ord = (at >= 0 && pend().ordered) ? `<span class="ord">${at + 1}</span>` : '';
+  const body = m
+    ? `<span class="s">${esc(m[2])}${esc(m[3])}</span><span class="n">${esc(m[1])}</span>`
+    : `<span class="n">${esc(label)}</span>`;
+  return `<span class="${cls.join(' ')}" data-opt="${i}">${ord}${body}</span>`;
 }
 
 /** 已经能在界面上点到的选项下标 —— 其余的要在按钮区补出来 */
@@ -378,37 +419,13 @@ function clickable() {
   if (meSeat !== null) {
     st.seats[meSeat].skills.forEach(n => { const i = idxOfSkill(n); if (i >= 0) out.add(i); });
   }
-  // 组合选项由"点武器 → 点素材"覆盖,不再铺成一排一模一样的按钮
-  for (const list of comboSources().values()) for (const i of list) out.add(i);
+  // 摊在中央牌堆里的也算"点得到",不再重复铺成按钮
+  for (const i of trayOptions()) out.add(i);
   return out;
-}
-
-/** 点了装备/技能上的"组合源"(丈八蛇矛) */
-function toggleCombo(via) {
-  if (sending) return;
-  combo = (combo && combo.via === via) ? null : { via, ids: [] };
-  sel = []; errMsg = '';
-  render(st);
-}
-
-/** 组合模式下点手牌:加减素材,凑齐就自动对上那个选项 */
-function toggleMaterial(cardId) {
-  if (!combo || sending) return;
-  const at = combo.ids.indexOf(cardId);
-  if (at >= 0) combo.ids.splice(at, 1);
-  else combo.ids.push(cardId);
-  const hit = comboMatch();
-  sel = hit >= 0 ? [hit] : [];
-  errMsg = '';
-  const p = pend();
-  // 凑齐了、而且这题只要一个答案,就直接走 —— 和点单张牌出牌一致
-  if (hit >= 0 && p.min === 1 && p.max === 1) send();
-  else render(st);
 }
 
 function toggle(i) {
   const p = pend(); if (!p || i < 0 || sending) return;
-  combo = null;                    // 点了普通选项就退出组合模式
   const at = sel.indexOf(i);
   if (at >= 0) sel.splice(at, 1);
   else if (p.max === 1) sel = [i];          // 单选:点新的就换掉旧的
@@ -431,7 +448,7 @@ async function send() {
     });
     const j = await r.json();
     if (!r.ok) { errMsg = j.error || '提交失败'; sending = false; render(st); return; }
-    sel = []; combo = null; errMsg = '';
+    sel = []; errMsg = '';
     // 成功之后不用自己重画:引擎会继续跑,下一帧快照自然推过来
   } catch (e) {
     errMsg = String(e.message || e);
@@ -441,30 +458,13 @@ async function send() {
 
 // ————————————————— 渲染 —————————————————
 
-/**
- * mode: 'hand' 自己的手牌(可当选项或组合素材) | 'equip' 自己的装备(可当组合源) | false 只读
- */
+/** mode: 'hand' 自己的手牌(可点) | false 只读 */
 function cardHtml(c, mode) {
   const cls = ['card'];
   if (c.red) cls.push('red');
   let attr = '', ord = '';
 
-  if (mode === 'equip') {
-    // 装备本身能不能当"组合源"(丈八蛇矛把两张手牌当杀)
-    if (comboSources().has(c.name)) {
-      cls.push('pick');
-      attr = ` data-combo="${esc(c.name)}"`;
-      if (combo && combo.via === c.name) cls.push('on');
-    }
-  } else if (mode === 'hand' && combo) {
-    // 组合模式:手牌当素材
-    if (comboUsable(c.id)) {
-      cls.push('pick');
-      attr = ` data-mat="${c.id}"`;
-      const at = combo.ids.indexOf(c.id);
-      if (at >= 0) { cls.push('on'); ord = `<span class="ord">${at + 1}</span>`; }
-    }
-  } else if (mode === 'hand') {
+  if (mode === 'hand') {
     const i = idxOfCard(c.id);
     const at = sel.indexOf(i);
     if (i >= 0) cls.push('pick');
@@ -523,7 +523,7 @@ function seatHtml(s, self) {
   }
   if (s.equips.length) {
     h += `<div class="row"><span class="k">装备</span><span class="cards">` +
-      s.equips.map(e => cardHtml(e.card, self ? 'equip' : false)).join('') + `</span></div>`;
+      s.equips.map(e => cardHtml(e.card, false)).join('') + `</span></div>`;
   }
   if (s.judge.length) {
     h += `<div class="row"><span class="k">判定</span>` +
@@ -555,18 +555,24 @@ function actHtml() {
 
   let h = `<div class="q">${esc(p.question)}</div>`;
 
-  const srcs = comboSources();
-  if (srcs.size) {
-    h += `<div class="opts">` + [...srcs.keys()].map(via =>
-      `<button data-combo="${esc(via)}" class="${combo && combo.via === via ? 'on' : ''}">` +
-      `用【${esc(via)}】</button>`).join('') + `</div>`;
+  /*
+   * 可点的东西在棋盘上、不在操作条里时,**必须明说**。
+   * 真实事故:轮到玩家给【遗计】选目标,操作条里一个按钮都没有(两个角色框才是选项),
+   * 玩家以为游戏卡死了。没有这行提示的话,那道题看起来就是个死局。
+   */
+  if (!rest.length && clicked.size) {
+    const kinds = new Set();
+    for (const i of clicked) {
+      const it = itemAt(p, i);
+      const mine = st.viewer !== null && it.kind === 'card'
+        && (st.seats[st.viewer].hand || []).some(c => it.ids.includes(c.id));
+      kinds.add(it.kind === 'player' ? '角色框'
+        : it.kind === 'skill' ? '技能'
+          : mine ? '手牌' : '中间摊开的牌');
+    }
+    h += `<div class="where">↑ 点描蓝的${[...kinds].join(' / ')}来选</div>`;
   }
-  if (combo) {
-    const hit = comboMatch();
-    h += `<div class="cnt" style="margin:0 0 6px">` +
-      `【${esc(combo.via)}】已选 ${combo.ids.length} 张素材` +
-      (hit >= 0 ? ` —— ${esc(p.options[hit])}` : `,点手牌继续选`) + `</div>`;
-  }
+
   if (rest.length) {
     h += `<div class="opts">` + rest.map(i =>
       `<button data-opt="${i}" class="${sel.includes(i) ? 'on' : ''}">${esc(p.options[i])}</button>`
@@ -609,7 +615,7 @@ function render(state) {
   const slots = RING_BY_COUNT[n - 1] || RING.slice(0, n - 1);
 
   const table = $('table');
-  [...table.children].forEach(el => { if (el.id !== 'me' && el.id !== 'mid') el.remove(); });
+  [...table.children].forEach(el => { if (el.id !== 'bottom' && el.id !== 'mid') el.remove(); });
 
   for (let k = 0; k < n - 1; k++) {
     const s = st.seats[(viewer + 1 + k) % n];
@@ -619,23 +625,34 @@ function render(state) {
     table.appendChild(box);
   }
 
-  // 操作条放在自己上面 —— 视线不用离开手牌
-  const act = document.getElementById('act') || (() => {
-    const d = document.createElement('div'); d.id = 'act'; $('me').before(d); return d;
-  })();
+  const tray = trayOptions();
+  const trayBox = $('tray');
+  trayBox.classList.toggle('on', tray.length > 0);
+  if (tray.length) {
+    const p = pend();
+    const range = p.min === p.max ? `选 ${p.min} 张` : `选 ${p.min}~${p.max} 张`;
+    trayBox.innerHTML = `<div class="t">${esc(p.question)} · ${range}` +
+      (p.ordered ? '(选中的顺序就是放回牌堆顶的顺序)' : '') + `</div>` +
+      `<div class="cards">` + tray.map(i => chipHtml(p.options[i], i)).join('') + `</div>`;
+  }
+
+  const act = $('act');
   act.innerHTML = actHtml();
   act.classList.toggle('on', !!pend());
 
   $('me').innerHTML = st.viewer === null ? '' : seatHtml(st.seats[viewer], true);
 
   const log = $('log');
-  if (st.log.length !== lastLogLen) {
-    lastLogLen = st.log.length;
+  // 用真实总行数判断有没有新内容 —— st.log 只有最近 200 行,长度会封顶
+  if (st.logTotal !== lastLogLen) {
+    lastLogLen = st.logTotal;
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     log.innerHTML = logHtml(st.log);
     if (atBottom) log.scrollTop = log.scrollHeight;
   }
-  $('logn').textContent = `${st.log.length} 行`;
+  $('logn').textContent = st.logTotal > st.log.length
+    ? `${st.logTotal} 行(只显示最近 ${st.log.length})`
+    : `${st.logTotal} 行`;
   $('deckinfo').innerHTML = `<span>牌堆 ${st.deck}</span><span>弃牌堆 ${st.discard}</span>`;
 
   if (st.over && !overShown) {
@@ -653,10 +670,6 @@ function render(state) {
 
 // 事件委托:角色框、手牌、技能、按钮都靠 data-opt 认领
 document.addEventListener('click', e => {
-  const src = e.target.closest('[data-combo]');
-  if (src) { toggleCombo(src.dataset.combo); return; }
-  const mat = e.target.closest('[data-mat]');
-  if (mat) { toggleMaterial(Number(mat.dataset.mat)); return; }
   const hit = e.target.closest('[data-opt]');
   if (hit) { toggle(Number(hit.dataset.opt)); return; }
   if (e.target.id === 'go') { send(); return; }
@@ -726,7 +739,7 @@ es.onmessage = e => {
   // 换了一道新题就把上一题的选择清掉,免得旧下标落到新选项上
   const before = pend();
   if (!next.pending || !before || next.pending.question !== before.question) {
-    sel = []; combo = null; errMsg = '';
+    sel = []; errMsg = '';
   }
   render(next);
 };

@@ -151,6 +151,8 @@ function main() {
     }
     console.log(C.bold('\n模型调用'));
     for (const [id, list] of byAgent) {
+      // 按计划兑现的那些一个请求都没发 —— 这就是计划省下来的量
+      const planned = list.filter(e => e.fromPlan).length;
       const lat = list.map(e => (e.attempts ?? []).reduce((s: number, a: any) => s + a.ms, 0))
         .sort((a, b) => a - b);
       const fb = list.filter(e => e.usedFallback).length;
@@ -160,6 +162,7 @@ function main() {
         `延迟 中位 ${ms(pct(lat, 0.5))} / p90 ${ms(pct(lat, 0.9))} / 最慢 ${ms(lat[lat.length - 1] ?? 0)}  ` +
         `重试 ${retries}  ` +
         (fb ? C.red(`兜底 ${fb}`) : C.green('兜底 0')) +
+        (planned ? C.green(`  按计划 ${planned}`) : '') +
         C.dim(`  输出 ${tok} tokens`));
 
       // 按供应商拆开 —— 同一个模型不同节点能差好几倍,改了路由之后就靠这个对比

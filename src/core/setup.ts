@@ -221,6 +221,19 @@ export function createGame(opts: SetupOptions): Game {
   // 起始手牌(1v1 的后手补牌就在这里生效)
   const defaultHand = n === 2 ? [4, 4 + DUEL_HANDICAP] : undefined;
   const hands = resolveStartingHands(n, opts.startingHand ?? defaultHand);
+
+  /*
+   * **后手补牌要跟着行动顺序走,不是跟着座位号。**
+   *
+   * 补牌数是按 [先手, 后手] 写的,以前"0 号位 = 主公 = 先手"永远成立,所以直接
+   * 按座位发就对。放开 fixedRoles 之后主公可以坐 1 号位 —— 而先手是跟着主公的,
+   * 于是出现过一次:主公坐 1 号位,既先手、又拿了本该补给后手的牌,优势叠了两层。
+   */
+  if (n === 2 && hands[0] !== hands[1]) {
+    const firstSeat = game.current.seat;
+    const richer = hands[0] > hands[1] ? 0 : 1;
+    if (richer === firstSeat) [hands[0], hands[1]] = [hands[1], hands[0]];
+  }
   for (let i = 0; i < n; i++) {
     game.players[i].hand.push(...game.drawFromDeck(hands[i]));
   }

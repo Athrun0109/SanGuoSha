@@ -114,3 +114,22 @@ test('resolveRoles 不吃掉多余的随机数 —— 未指定时和原实现�
   const expect: Role[] = ['lord', ...new RNG(7).shuffle(table.slice(1))];
   assert.deepEqual(resolveRoles(5, new RNG(7)), expect);
 });
+
+test('1v1 的后手补牌跟着先手走,不是跟着座位号', () => {
+  /*
+   * 真实事故:把主公钉在 1 号位之后,他既先手(先手跟着主公)、又拿了本该补给
+   * 后手的那几张牌 —— 优势叠了两层,对局第一轮就结束了。
+   * 补牌数组是按 [先手, 后手] 写的,座位号只是以前恰好对得上。
+   */
+  for (const [lordSeat, label] of [[0, '主公坐 0 号位'], [1, '主公坐 1 号位']] as const) {
+    const g = createGame({
+      playerCount: 2, seed: 5, startingHand: [4, 7],
+      fixedRoles: { [lordSeat]: 'lord' },
+      log: () => {}, makeAgent: (_p, i) => new BasicAI(`ai${i}`),
+    });
+    assert.equal(g.current.role, 'lord', '主公先手');
+    assert.equal(g.current.hand.length, 4, `${label}:先手不该拿补牌`);
+    const second = g.players.find(p => p !== g.current)!;
+    assert.equal(second.hand.length, 7, `${label}:补牌要发给后手`);
+  }
+});

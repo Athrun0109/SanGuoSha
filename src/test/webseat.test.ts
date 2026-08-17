@@ -17,6 +17,8 @@ import { createGame } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { WebAgent } from '../web/webAgent.js';
 import { snapshot } from '../web/state.js';
+import { give } from './helpers.js';
+import { realCard } from '../core/types.js';
 import type { Game } from '../core/game.js';
 
 /** 开一局,0 号位是网页座位。返回 agent 和「跑到下一个待决策点」的 promise */
@@ -36,6 +38,21 @@ function start(seed = 2026) {
 }
 
 const settle = () => new Promise(r => setTimeout(r, 0));
+
+/** 开一局,0 号位是网页座位,引擎不自动跑 —— 由测试自己驱动到想要的那一步 */
+async function stage(generals: Record<number, string>) {
+  let web!: WebAgent;
+  const game = createGame({
+    playerCount: 3, seed: 4, fixedGenerals: generals, log: () => {},
+    makeAgent: (_p, i) => {
+      if (i !== 0) return new BasicAI(`ai${i}`);
+      web = new WebAgent('you', () => {});
+      return web;
+    },
+  });
+  game.current = game.players[0];
+  return { game, me: game.players[0], web: web! };
+}
 
 test('轮到网页座位时挂起,题面和选项都拿得到', async () => {
   const { web, hits } = start();
@@ -172,4 +189,48 @@ test('中止之后不会再接新题', async () => {
     () => web.chooseSuit(game, game.players[0], '反间:请选择一种花色'),
     (e: Error) => e.name === 'GameAborted',
   );
+});
+
+// ————————————————— 中央牌堆 —————————————————
+
+/**
+ * 候选**本身是牌**、而且**不在自己手上**时,界面把它们摊在中央给你看。
+ * 判据就是 items 里的 card 类型 + 卡牌 id 在不在自己手里 —— 这两条锁住,
+ * 前端那段渲染逻辑就有依据。
+ */
+test('五谷的候选是"牌",不是一排文字按钮', async () => {
+  const { game, me, web } = await stage({ 0: '孙权', 1: '吕蒙', 2: '甘宁' });
+  const c = give(game, me, '五谷丰登', '♥', 3);
+  const pr = game.useCard(game.makeUse(realCard(c), me, (await game.selectTargets(me, realCard(c)))!));
+  await settle();
+
+  const p = web.pending!;
+  assert.match(p.question, /五谷丰登/);
+  assert.ok(p.options.length >= 2);
+  assert.ok(p.items.every(it => it.kind === 'card'),
+    '候选必须是牌类型,否则界面只能画成文字按钮:' + JSON.stringify(p.items));
+
+  const mine = new Set(me.hand.map(x => x.id));
+  assert.ok(p.items.every(it => it.kind === 'card' && !it.ids.some(id => mine.has(id))),
+    '五谷的候选来自牌堆,不该和自己手牌重合 —— 重合了就会被误判成"在手牌里点"');
+  web.submit([0]);
+  await pr;
+});
+
+test('弃牌选的是自己的手牌 —— 那些在手牌行里点,不进中央牌堆', async () => {
+  const { game, me, web } = await stage({ 0: '孙权', 1: '吕蒙', 2: '甘宁' });
+  give(game, me, '杀', '♠', 9);
+  give(game, me, '桃', '♥', 8);
+  me.hp = 1;                                   // 手牌上限 1,必须弃
+  const pr = game.runPhase(me, 'discard');
+  await settle();
+
+  const p = web.pending!;
+  assert.match(p.question, /弃/);
+  const mine = new Set(me.hand.map(x => x.id));
+  assert.ok(p.items.every(it => it.kind === 'card' && it.ids.every(id => mine.has(id))),
+    '弃牌的候选全是自己的手牌');
+  // 弃牌是 min=max=N,少交一个会被校验挡回、promise 永远不兑现(这里挂过一次)
+  assert.equal(web.submit(Array.from({ length: p.min }, (_, i) => i)), null);
+  await pr;
 });

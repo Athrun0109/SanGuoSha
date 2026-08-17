@@ -134,7 +134,33 @@ test('局面带花色点数,战报不带', async () => {
   const l3 = filterLog(g2.logLines);
   assert.ok(l3.length > 20, '样本要够大才说明问题');
   for (const l of l3) {
+    if (l.includes('弃置')) continue;    // 弃牌是例外,见下面那条
     assert.ok(!CARD_MARK.test(l), `战报里不该出现花色点数:${l}`);
+  }
+});
+
+test('例外:弃牌要保留花色点数 —— 它直接支撑手牌推理', async () => {
+  // 对手弃了一张【闪】说明他不缺闪,弃掉红桃说明红牌够用。
+  // 这类线索只有带着花色点数才成立,所以弃牌行不做删减。
+  const game = mk({}, 3);
+  await game.setupAndRun();
+  const discards = filterLog(game.logLines).filter(l => l.includes('弃置'));
+  assert.ok(discards.length > 0, '一整局总该有人弃牌');
+  assert.ok(discards.some(l => CARD_MARK.test(l)),
+    `弃牌行要带花色点数,实际:${discards.slice(0, 3).join(' / ')}`);
+});
+
+test('弃牌阶段要记下弃了哪几张,而不只是"需弃置 N 张"', async () => {
+  const game = mk({}, 3);
+  await game.setupAndRun();
+  const raw = game.logLines.map(l => l.trim());
+  const need = raw.filter(l => /手牌上限 \d+,需弃置/.test(l));
+  assert.ok(need.length > 0, '一整局总该有人手牌超上限');
+  // 每条"需弃置"后面都该跟着一条"弃置 …"
+  for (let i = 0; i < raw.length; i++) {
+    if (!/手牌上限 \d+,需弃置/.test(raw[i])) continue;
+    assert.match(raw[i + 1] ?? '', /弃置 /,
+      `"${raw[i]}" 后面没有记录弃了什么(下一行是「${raw[i + 1]}」)`);
   }
 });
 

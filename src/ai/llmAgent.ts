@@ -25,8 +25,9 @@ import { BasicAI } from './basicAI.js';
 import { BeliefTable, READS_SCHEMA, type BeliefRow, type Read } from './beliefs.js';
 import { ChoiceAgent, validateChoice } from './choiceAgent.js';
 import type { CodecMode } from './codec.js';
+import { PLAN_SCHEMA, PlanRunner, isPlayAction, type PlanStep } from './plan.js';
 import {
-  buildRules, eventsBlock, filterLog, identityBlock, questionBlock, situationBlock,
+  buildRules, eventsBlock, filterLog, identityBlock, planHint, questionBlock, situationBlock,
 } from './rulesPrompt.js';
 
 /** 只依赖这一点点接口,方便测试时注入假客户端 */
@@ -66,6 +67,11 @@ export interface LLMAgentOptions {
   maxLogChars?: number;
   /** 回带几条自己最近的推理 */
   selfNotes?: number;
+  /**
+   * 让模型一次写好接下来几步(见 plan.ts)。默认开。
+   * 关掉就是每一步都单独问一遍模型 —— 慢,但行为最容易预测。
+   */
+  plan?: boolean;
   fallback?: Agent;
   onDecision?: (info: DecisionInfo) => void;
 }
@@ -96,6 +102,8 @@ export interface DecisionInfo {
     provider?: string;
   }>;
 
+  /** 这一步是从计划里兑现的,没发请求 */
+  fromPlan?: boolean;
   /** 本次生效的身份判断更新(模型没更新时为空) */
   reads?: Read[];
   /** 更新之后的完整判断表,带真实身份和对错 —— 只用于日志,不回流给模型 */
@@ -120,28 +128,28 @@ const OVERSIZE_ERROR = /max_tokens|max_completion_tokens|output token/i;
 /** 截断重试的封顶。再高也没有模型吐得出来,只会白撞一次拒绝 */
 const MAX_BUDGET = 65536;
 
-const DECISION_SCHEMA = {
-  type: 'object',
-  properties: {
-    thinking: { type: 'string', description: '简短中文推理' },
-    choice: { type: 'array', items: { type: 'integer' }, description: '选中的选项编号' },
-    reads: READS_SCHEMA,
-  },
-  // strict 模式下所有字段都必须列进 required,所以 reads 不更新时给空数组
-  required: ['thinking', 'choice', 'reads'],
-  additionalProperties: false,
+const THINKING = { type: 'string', description: '简短中文推理' } as const;
+const CHOICE = {
+  type: 'array', items: { type: 'integer' }, description: '选中的选项编号',
 } as const;
 
-/** 2 人局身份从配置就能推出,没什么可猜的,连 reads 字段一起省掉 */
-const DUEL_SCHEMA = {
-  type: 'object',
-  properties: {
-    thinking: DECISION_SCHEMA.properties.thinking,
-    choice: DECISION_SCHEMA.properties.choice,
-  },
-  required: ['thinking', 'choice'],
-  additionalProperties: false,
-} as const;
+/**
+ * 按需拼 schema —— 多一个字段就多一份输出 token,不该问的场合就别问。
+ *  - reads:2 人局身份从配置就能推出,没什么可猜的,整个字段省掉
+ *  - plan:只有出牌阶段才有"接下来几步"可言,响应类决策问了也是白问
+ */
+function schemaFor(wantReads: boolean, wantPlan: boolean) {
+  const properties: Record<string, unknown> = { thinking: THINKING, choice: CHOICE };
+  if (wantReads) properties.reads = READS_SCHEMA;
+  if (wantPlan) properties.plan = PLAN_SCHEMA;
+  return {
+    type: 'object',
+    properties,
+    // strict 模式下所有字段都必须列进 required
+    required: Object.keys(properties),
+    additionalProperties: false,
+  };
+}
 
 export class LLMAgent extends ChoiceAgent {
   readonly id: string;
@@ -156,12 +164,16 @@ export class LLMAgent extends ChoiceAgent {
   private notes: string[] = [];
   private lastError = '';
   private errorRepeats = 0;
+  /** 计划执行器:模型一次写好几步,后续几步直接本地兑现,不再发请求 */
+  private planner = new PlanRunner();
   /** 身份判断的持久记忆。人数 ≤2 时自动停用 */
   beliefs: BeliefTable | null = null;
 
   stats = {
     calls: 0, fallbacks: 0, payloadChars: 0,
     inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+    /** 靠计划省下来的决策次数(这些一个请求都没发) */
+    planned: 0, planDropped: 0,
   };
 
   constructor(id: string, opts: LLMAgentOptions) {
@@ -179,6 +191,7 @@ export class LLMAgent extends ChoiceAgent {
       maxLogLines: opts.maxLogLines ?? 40,
       maxLogChars: opts.maxLogChars ?? 350,
       selfNotes: opts.selfNotes ?? 4,
+      plan: opts.plan ?? true,
     };
     this.codecMode = this.o.codec;
   }
@@ -206,6 +219,19 @@ export class LLMAgent extends ChoiceAgent {
   protected async decide(
     game: Game, self: Player, question: string, options: string[], min: number, max: number,
   ): Promise<number[] | null> {
+    // 这一步计划里已经写好了?那就直接兑现,一个请求都不发
+    const planned = this.planner.answer(game, self, question, options, min, max, (why) => {
+      game.log(`  \x1b[90m※ ${this.id} 放弃剩余计划(${why})\x1b[0m`);
+    });
+    if (planned) {
+      this.stats.planned++;
+      this.onDecision?.({
+        agentId: this.id, prompt: question, options, thinking: '(按计划执行)',
+        choice: planned, usedFallback: false, payloadChars: 0, fromPlan: true,
+      });
+      return planned;
+    }
+
     const system = this.ensureSystem(game, self);
     const c = this.c(game);
 
@@ -214,6 +240,8 @@ export class LLMAgent extends ChoiceAgent {
     // 一轮只催一次复核 —— 一局两百多次决策,大多是"要不要出闪",
     // 每次都让它重算身份纯属烧 token
     const wantReads = this.beliefs.claimRefresh(game.round);
+    // 只有出牌阶段才谈得上"接下来几步"
+    const wantPlan = this.o.plan && isPlayAction(question);
 
     const parts = [situationBlock(game, self, c)];
     const ev = eventsBlock(this.recentLog(game), c, this.o.maxLogChars);
@@ -223,6 +251,7 @@ export class LLMAgent extends ChoiceAgent {
     if (this.notes.length) parts.push(`你最近的判断\n${this.notes.map(n => '- ' + n).join('\n')}`);
     parts.push(questionBlock(question, options, min, max, c));
     if (wantReads) parts.push(BeliefTable.refreshHint());
+    if (wantPlan) parts.push(planHint());
     const payload = parts.join('\n\n');
 
     const messages: any[] = [{ role: 'user', content: payload }];
@@ -234,6 +263,7 @@ export class LLMAgent extends ChoiceAgent {
     let lastErr = '';
     let rawText = '';
     let reads: Read[] = [];
+    let newPlan: unknown = null;
     const attempts: NonNullable<DecisionInfo['attempts']> = [];
 
     for (let attempt = 0; attempt < 3 && choice === null; attempt++) {
@@ -249,7 +279,7 @@ export class LLMAgent extends ChoiceAgent {
             effort: this.o.effort,
             format: {
               type: 'json_schema',
-              schema: this.beliefs.enabled ? DECISION_SCHEMA : DUEL_SCHEMA,
+              schema: schemaFor(this.beliefs.enabled, wantPlan),
             },
           },
           cache_control: { type: 'ephemeral' },
@@ -272,6 +302,7 @@ export class LLMAgent extends ChoiceAgent {
         thinking = String(parsed.thinking ?? '');
         // 身份判断先收下 —— 哪怕 choice 不合法要重试,这份判断也是有效信息
         reads = this.beliefs.apply(parsed.reads as Read[] | undefined, game.round);
+        newPlan = parsed.plan;
         const raw = Array.isArray(parsed.choice) ? parsed.choice : [];
         const err = validateChoice(raw, options.length, min, max);
         if (err) {
@@ -312,7 +343,15 @@ export class LLMAgent extends ChoiceAgent {
       }
     }
 
+    // 选择合法了才收计划 —— 兜底那次的"计划"多半也是错的
+    if (choice !== null && wantPlan) {
+      this.planner.adopt(game, self, newPlan, (why) => {
+        if (why !== '模型给的计划为空') game.log(`  \x1b[90m※ ${this.id} 计划未采纳(${why})\x1b[0m`);
+      });
+    }
+
     this.stats.payloadChars += payload.length;
+    this.stats.planDropped = this.planner.dropped;
     if (choice === null) this.stats.fallbacks++;
     else if (thinking) {
       this.notes.push(thinking);
@@ -341,7 +380,9 @@ export class LLMAgent extends ChoiceAgent {
  * 但换到别的后端(OpenRouter 上的各种模型)未必那么规矩 —— 可能裹 ```json 围栏、
  * 可能前面带一句废话。这里做最小限度的容错,免得为了一个围栏就退到兜底 AI。
  */
-export function extractJson(text: string): { thinking?: string; choice?: unknown; reads?: unknown } {
+export function extractJson(text: string): {
+  thinking?: string; choice?: unknown; reads?: unknown; plan?: unknown;
+} {
   const tryParse = (s: string) => {
     try { return JSON.parse(s); } catch { return null; }
   };

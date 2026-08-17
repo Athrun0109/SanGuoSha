@@ -26,7 +26,7 @@ const CARD_VALUE: Record<string, number> = {
   诸葛连弩: 55, 青龙偃月刀: 45, 贯石斧: 42, 方天画戟: 38, 麒麟弓: 40,
   雌雄双股剑: 36, 青釭剑: 38, 丈八蛇矛: 40,
   八卦阵: 48, 仁王盾: 44,
-  '-1马': 40, '+1马': 38,
+  '进攻马': 40, '防御马': 38,
 };
 
 const HARMFUL = new Set(['杀', '决斗', '过河拆桥', '顺手牵羊', '南蛮入侵', '万箭齐发', '乐不思蜀', '闪电', '借刀杀人']);
@@ -358,8 +358,9 @@ export class BasicAI implements Agent {
       return [];
     }
     const sorted = [...cards].sort((a, b) => cardValue(a) - cardValue(b));
-    // 仁德送牌:送最没用的
     const n = Math.max(min, Math.min(max, min));
+    // 默认挑最便宜的(弃牌、送牌都是这个方向);但**五谷是抢牌**,得反过来挑最好的
+    if (prompt.startsWith('五谷')) return sorted.slice(-n);
     return sorted.slice(0, n);
   }
 

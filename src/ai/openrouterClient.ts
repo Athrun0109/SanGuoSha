@@ -29,6 +29,8 @@ export interface OpenRouterOptions {
    * 传 null 可以完全关掉,交回 OpenRouter 自己的默认路由。
    */
   provider?: Record<string, unknown> | null;
+  /** 思考深度 → 推理 token 预算。默认见 REASONING_BUDGET;传 null 改回按 effort 走 */
+  reasoningBudget?: Record<string, number> | null;
   /** 请求超过 10s 后每 10s 回调一次,用来告诉用户"还在等" */
   onProgress?: (seconds: number) => void;
   /** 打印每次请求的耗时和用量 */
@@ -37,6 +39,25 @@ export interface OpenRouterOptions {
 
 const EFFORT_MAP: Record<string, 'low' | 'medium' | 'high'> = {
   low: 'low', medium: 'medium', high: 'high', xhigh: 'high', max: 'high',
+};
+
+/**
+ * 思考深度 → **推理 token 预算**。这是延迟的硬上限。
+ *
+ * 注意 API 收的是 token 数,不是秒数;而且 OpenRouter 明确规定
+ * `reasoning.effort` 和 `reasoning.max_tokens` **只能二选一**。所以这里换算了一道:
+ * 按实测吞吐 ~120 tok/s 折算,
+ *
+ *   low 2400 ≈ 20s | medium 6000 ≈ 50s | high 12000 ≈ 100s
+ *
+ * 秒数只是估的 —— 不同供应商吞吐差一倍(实测 84~180 tok/s),token 数才是硬的。
+ *
+ * 为什么需要它:实测有一次决策烧了 11,215 个推理 token、等了 109 秒。根因是选项
+ * 里混进了 15 个丈八蛇矛的两两组合(那个已经单独修了),但这类爆炸随时可能从别处
+ * 冒出来,所以留一道闸门。传 null 可以关掉,退回按 effort 走。
+ */
+export const REASONING_BUDGET: Record<string, number> = {
+  low: 2400, medium: 6000, high: 12000, xhigh: 12000, max: 12000,
 };
 
 /** 见下面 timeoutMs 那段注释:它和 maxTokens 是必须一起动的一对 */
@@ -77,11 +98,12 @@ export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient 
    */
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const provider = opts.provider === null ? null : (opts.provider ?? DEFAULT_PROVIDER);
+  const budgets = opts.reasoningBudget === null ? null : (opts.reasoningBudget ?? REASONING_BUDGET);
 
   return {
     messages: {
       async create(params: any) {
-        const body = toOpenAI({ ...params, provider });
+        const body = toOpenAI({ ...params, provider, reasoningBudget: budgets });
         const ctl = new AbortController();
         // 超时必须一直罩到**读完响应体**为止。
         // 只罩 fetch() 是不够的 —— 它在收到响应头时就 resolve 了,
@@ -215,7 +237,19 @@ export function toOpenAI(params: any): Record<string, unknown> {
     };
   }
   const effort = params.output_config?.effort;
-  if (effort && EFFORT_MAP[effort]) out.reasoning = { effort: EFFORT_MAP[effort] };
+  if (effort) {
+    // 二选一:有 token 预算就用它(硬上限),否则退回 effort 三档
+    const budget = params.reasoningBudget?.[effort];
+    if (budget) {
+      out.reasoning = { max_tokens: budget };
+      // 文档要求:整体 max_tokens 必须严格大于推理预算,否则正文没地方写
+      if (typeof out.max_tokens === 'number' && out.max_tokens <= budget) {
+        out.max_tokens = budget * 2;
+      }
+    } else if (EFFORT_MAP[effort]) {
+      out.reasoning = { effort: EFFORT_MAP[effort] };
+    }
+  }
 
   return out;
 }

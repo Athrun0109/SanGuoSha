@@ -24,7 +24,9 @@ export async function pickCardFrom(
 ): Promise<Card | null> {
   const zones: { label: string; cards: Card[] }[] = [];
   if (target.hand.length) zones.push({ label: `手牌(${target.hand.length}张,随机一张)`, cards: target.hand });
-  for (const c of target.equipCards) zones.push({ label: `装备区 ${c.name}`, cards: [c] });
+  // 装备区也带花色点数 —— 对方装了两匹马时,只写牌名就分不清是哪一张。
+  // (判定区早就带了,这里一直不一致)
+  for (const c of target.equipCards) zones.push({ label: `装备区 ${cardLabel(c)}`, cards: [c] });
   for (const c of target.judgeZone) zones.push({ label: `判定区 ${game.judgeLabel(target, c)}`, cards: [c] });
   if (!zones.length) return null;
   const idx = await game.agentOf(chooser).chooseOption(game, chooser, zones.map(z => z.label), prompt);
@@ -197,7 +199,11 @@ defineCard({
   targetMax: 0,
   // 收益牌从**使用者自己**开始按座次 —— 五谷先挑走好牌是使用它的主要理由。
   // g.alivePlayers 是按座位号排的,不是按行动顺序,用它会让 0 号位永远先挑。
-  autoTargets: (g, from) => g.playersFrom(from, true),
+  //
+  // **满血的角色直接跳过。**【桃】本身就有 canUse: from.isWounded(满血不能用),
+  // 桃园结义没理由不一致。而且不跳的话,每个满血角色都会白开一个无懈可击窗口 ——
+  // 问全场"要不要抵消一个必然什么都不会发生的效果",纯粹是浪费决策点。
+  autoTargets: (g, from) => g.playersFrom(from, true).filter(p => p.isWounded),
   async onEffect({ game, from, to }) {
     await game.recover(to, 1, from, '桃园结义');
   },
@@ -221,10 +227,12 @@ defineCard({
     }
     const pool: Card[] = use.tags.wugu;
     if (!pool.length) return;
-    const idx = await game.agentOf(to).chooseOption(
-      game, to, pool.map(cardLabel), '五谷丰登:选择一张牌',
-    );
-    const pick = pool.splice(Math.max(0, Math.min(idx, pool.length - 1)), 1)[0];
+    // 用 chooseCards 而不是 chooseOption —— 这本来就是在选牌。
+    // 换过来之后界面能把候选画成牌摊在中央,而不是一排文字按钮;
+    // 模型那边也一样,选项带上了花色点数的结构信息。
+    const chosen = await game.agentOf(to).chooseCards(game, to, pool, 1, 1, '五谷丰登:选择一张牌');
+    const pick = chosen[0] && pool.includes(chosen[0]) ? chosen[0] : pool[0];
+    pool.splice(pool.indexOf(pick), 1);
     game.log(`  ${to.name} 取走 ${cardLabel(pick)}`);
     await game.gainCards(to, [pick], '五谷丰登');
     game.revealToAll(pick, to); // 五谷是亮出来取的,全场都看得见
@@ -503,8 +511,8 @@ function horse(name: string, kind: 'horse+1' | 'horse-1') {
 // 六匹马在标准版里功能完全一样,名字纯属风味。合并成两张牌:
 // 牌名直接就是效果,少三个词汇要教给 LLM,前端也不用再解释"的卢是哪种马"。
 // 花色点数保留 —— 判定、拆牌、顺手牵羊都要用。
-horse('-1马', 'horse-1');
-horse('+1马', 'horse+1');
+horse('进攻马', 'horse-1');
+horse('防御马', 'horse+1');
 
 // ————————————————— 牌堆 —————————————————
 
@@ -552,10 +560,10 @@ export const DECK_TABLE: DeckEntry[] = [
   ['麒麟弓', '♥', 5],
   ['八卦阵', '♠', 2], ['八卦阵', '♦', 2],
   ['仁王盾', '♣', 2],
-  // 花色点数按官方标准版:+1马 = 的卢♣5 / 绝影♠5 / 爪黄飞电♥13
-  //                      -1马 = 赤兔♥5 / 大宛♠13 / 紫骍♦13
-  ['+1马', '♣', 5], ['+1马', '♠', 5], ['+1马', '♥', 13],
-  ['-1马', '♥', 5], ['-1马', '♠', 13], ['-1马', '♦', 13],
+  // 花色点数按官方标准版:防御马 = 的卢♣5 / 绝影♠5 / 爪黄飞电♥13
+  //                      进攻马 = 赤兔♥5 / 大宛♠13 / 紫骍♦13
+  ['防御马', '♣', 5], ['防御马', '♠', 5], ['防御马', '♥', 13],
+  ['进攻马', '♥', 5], ['进攻马', '♠', 13], ['进攻马', '♦', 13],
 ];
 
 export function buildDeck(): Card[] {

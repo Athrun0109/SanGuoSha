@@ -29,7 +29,7 @@ export const CARD_CODE: Record<string, string> = {
   诸葛连弩: 'w1', 雌雄双股剑: 'w2', 青釭剑: 'w3', 青龙偃月刀: 'w4',
   丈八蛇矛: 'w5', 贯石斧: 'w6', 方天画戟: 'w7', 麒麟弓: 'w8',
   八卦阵: 'a1', 仁王盾: 'a2',
-  '+1马': 'h+', '-1马': 'h-',
+  '防御马': 'h+', '进攻马': 'h-',
 };
 
 export class Codec {

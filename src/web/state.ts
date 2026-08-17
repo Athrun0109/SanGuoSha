@@ -20,7 +20,7 @@ import {
 } from '../core/types.js';
 
 export const SLOT_NAME: Record<EquipSlot, string> = {
-  weapon: '武器', armor: '防具', 'horse+1': '+1马', 'horse-1': '-1马',
+  weapon: '武器', armor: '防具', 'horse+1': '防御马', 'horse-1': '进攻马',
 };
 const SLOT_ORDER: EquipSlot[] = ['weapon', 'armor', 'horse+1', 'horse-1'];
 
@@ -79,6 +79,12 @@ export interface ViewState {
   deck: number;
   discard: number;
   log: string[];
+  /**
+   * 战报的**真实总行数**(log 只带最近 logTail 行)。
+   * 前端拿它判断有没有新内容 —— 用 log.length 是不行的:到了 200 就封顶不动,
+   * 于是"长度变了"这个判据永远为假,战报会直接冻住。
+   */
+  logTotal: number;
   over: boolean;
   winners: number[];
   reason: string;
@@ -167,6 +173,7 @@ export function snapshot(game: Game, opts: SnapshotOptions = {}): ViewState {
     deck: game.deck.length,
     discard: game.discardPile.length,
     log: game.logLines.slice(-logTail),
+    logTotal: game.logLines.length,
     over: game.finished,
     winners: game.winners.map(p => p.seat),
     reason,

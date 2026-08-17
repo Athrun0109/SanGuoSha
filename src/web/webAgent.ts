@@ -21,8 +21,7 @@ import type { CodecMode } from '../ai/codec.js';
 
 /** 一个选项背后指向什么实体。前端据此把选项映射到界面上点得到的东西 */
 export type OptionItem =
-  /** via:这张虚拟牌是靠哪件装备/技能转化出来的(丈八蛇矛、武圣…)。
-   *  多张素材合成时,界面靠它把 C(n,2) 个选项收成"先点武器、再点牌"两步。 */
+  /** via:这张虚拟牌是靠哪件装备/技能转化出来的(武圣、倾国…),给界面加个提示用 */
   | { kind: 'card'; ids: number[]; via?: string }
   | { kind: 'player'; seat: number }
   | { kind: 'skill'; name: string }
@@ -128,7 +127,9 @@ export class WebAgent extends ChoiceAgent {
 
   async choosePlayAction(game: Game, self: Player, actions: PlayAction[]): Promise<number> {
     this.nextItems = actions.map((a): OptionItem =>
-      a.kind === 'card' ? this.cardItem(a.card)
+      // 素材待定的选项在界面上点不到具体的牌 —— 它就是一个按钮,
+      // 点了之后引擎会另外问"用哪几张",那一问才对应到手牌
+      a.kind === 'card' ? (a.pick ? { kind: 'plain' } : this.cardItem(a.card))
         : a.kind === 'skill' ? { kind: 'skill', name: a.skill.name }
           : { kind: 'end' });
     return super.choosePlayAction(game, self, actions);
@@ -138,7 +139,7 @@ export class WebAgent extends ChoiceAgent {
     game: Game, self: Player, options: CardOption[], prompt: string, forced: boolean,
     ctx: ResponseCtx = {},
   ): Promise<number> {
-    this.nextItems = options.map((o): OptionItem => this.cardItem(o.card));
+    this.nextItems = options.map((o): OptionItem => o.pick ? { kind: 'plain' } : this.cardItem(o.card));
     return super.chooseResponse(game, self, options, prompt, forced, ctx);
   }
 
