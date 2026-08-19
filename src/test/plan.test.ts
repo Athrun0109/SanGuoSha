@@ -97,29 +97,73 @@ test('换了回合就作废,不把上一回合的计划带过来', () => {
   assert.equal(why, '换了回合');
 });
 
-test('只接管出牌阶段的题 —— 出闪、选桃这类响应不归计划管', () => {
+test('冒出一道计划管不着的题 → 整份作废,不闭眼走完', () => {
+  /*
+   * 判据是「计划没预料到的事发生了」。刚烈让你选掉血还是弃牌、拆桥被无懈后要不要
+   * 反无懈、决斗要你接杀 —— 这些一出现就说明局面偏离了计划,后面几步的前提可能
+   * 已经不成立,必须把新局势交回模型重新规划。
+   */
   const { game, me } = mk();
   const r = new PlanRunner();
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
+  let why = '';
   assert.equal(
-    r.answer(game, me, '0号位·刘备 对你使用【杀】,请打出【闪】', ['闪[♦6]'], 0, 1), null,
-    '响应类决策必须回到模型手里');
-  assert.equal(r.pending, 1, '而且不该因此把计划丢掉');
+    r.answer(game, me, '0号位·刘备 对你使用【杀】,请打出【闪】', ['闪[♦6]'], 0, 1, w => { why = w; }),
+    null, '响应类决策必须回到模型手里');
+  assert.equal(why, '出了计划外的状况');
+  assert.equal(r.pending, 0, '剩余步骤也要丢掉 —— 前提已经变了');
 });
 
-test('子问题对不上只放弃这一步,后面的步骤还留着', () => {
+test('区域按语义认,不要求照抄 —— 写计划时那些选项还不存在', () => {
+  /*
+   * 真实事故:模型写了 zone:"手牌区",而选项是「手牌(4张,随机一张)」,对不上。
+   * 但这不能怪它 —— 写计划的时候区域选项根本还没生成,它没见过那行字。
+   * 区域只有三种,是封闭集合,按关键词认类别才是对的。
+   */
+  const zones = ['手牌(4张,随机一张)', '装备区 仁王盾[♣2]', '判定区 乐不思蜀[♠6]'];
+  for (const [zone, want] of [
+    ['手牌区', 0], ['手牌', 0], ['装备区', 1], ['装备区 仁王盾', 1], ['判定区', 2],
+  ] as const) {
+    const { game, me } = mk();
+    const r = new PlanRunner();
+    r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '过河拆桥[♣3]', target: 1, zone }]);
+    r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1);
+    assert.deepEqual(r.answer(game, me, '拆:弃置一张牌', zones, 1, 1), [want], `zone=${zone}`);
+  }
+});
+
+test('同一区域有多张时靠牌名区分,认不出就交回模型', () => {
+  const zones = ['装备区 进攻马[♦K]', '装备区 防御马[♣5]'];
+  const pick = (zone: string) => {
+    const { game, me } = mk();
+    const r = new PlanRunner();
+    r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '过河拆桥[♣3]', target: 1, zone }]);
+    r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1);
+    return r.answer(game, me, '拆:弃置一张牌', zones, 1, 1);
+  };
+  assert.deepEqual(pick('装备区 防御马'), [1], '写了牌名就该认出来');
+  assert.equal(pick('装备区'), null, '两匹马都在装备区,没写牌名就别猜');
+});
+
+test('计划里的牌被无懈抵消 → 后面的步骤要重新规划', () => {
+  // "拆掉仁王盾再用黑杀":拆桥被无懈之后,那张杀的价值就变了
   const { game, me } = mk();
   const r = new PlanRunner();
-  r.adopt(game, me, [
-    { act: 'A', target: -1, zone: '' },
-    { act: '过河拆桥[♣3]', target: 1, zone: '装备区 已经没了的牌' },
-    { act: '杀[♣10]', target: 1, zone: '' },
-  ]);
-  r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1);
-  // 区域对不上 → 交回模型
-  assert.equal(r.answer(game, me, '拆:弃置一张牌', ['手牌(1张,随机一张)'], 1, 1), null);
-  // 但下一步的杀仍然能兑现
-  assert.deepEqual(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1), [0]);
+  r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
+  game.nullified++;
+  let why = '';
+  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, w => { why = w; }), null);
+  assert.equal(why, '牌被无懈可击抵消');
+});
+
+test('中途掉血也要重新规划', () => {
+  const { game, me } = mk();
+  const r = new PlanRunner();
+  r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
+  me.hp -= 1;                       // 决斗输了 / 闪电劈了
+  let why = '';
+  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, w => { why = w; }), null);
+  assert.equal(why, '中途掉血');
 });
 
 // ————————————————— 接到 LLMAgent 上 —————————————————

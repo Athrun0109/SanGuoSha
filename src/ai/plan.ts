@@ -39,7 +39,9 @@ export interface PlanStep {
 }
 
 /** 计划被丢弃的原因,进日志用 */
-export type DropReason = '摸到新牌' | '换了回合' | '对不上选项' | '计划已用完' | '模型给的计划为空';
+export type DropReason =
+  | '摸到新牌' | '换了回合' | '对不上选项' | '模型给的计划为空'
+  | '牌被无懈可击抵消' | '中途掉血' | '出了计划外的状况';
 
 export const PLAN_SCHEMA = {
   type: 'array',
@@ -51,7 +53,12 @@ export const PLAN_SCHEMA = {
     properties: {
       act: { type: 'string', description: '照抄选项里的动作文本,例如 杀[♣10]' },
       target: { type: 'integer', description: '目标座位号;不需要指定目标时填 -1' },
-      zone: { type: 'string', description: '拆/顺要拿的区域,照抄选项文本;不需要时填空字符串' },
+      zone: {
+        type: 'string',
+        description:
+          '过河拆桥/顺手牵羊要拿哪个区域:填 手牌 / 装备区 / 判定区。' +
+          '对方装备区或判定区有多张时,再带上牌名(如「装备区 仁王盾」)。不需要时填空字符串',
+      },
     },
     // strict 模式下所有字段都必须列进 required,所以用 -1 / '' 当"没有"
     required: ['act', 'target', 'zone'],
@@ -68,6 +75,34 @@ const looksLikePlayers = (o: string[]) => o.length > 0 && o.every(x => /^P\d+/.t
 /** 选项里有区域名 → 这是在问拆/顺哪个区域 */
 const looksLikeZones = (o: string[]) =>
   o.some(x => x.startsWith('装备区') || x.startsWith('判定区') || x.startsWith('手牌('));
+
+/**
+ * 区域按**语义**匹配,不按文本照抄。
+ *
+ * 这里踩过一次:schema 里写的是"照抄区域文本",可**写计划的时候区域选项根本还不存在** ——
+ * 模型没见过 `手牌(4张,随机一张)` 这行字,只能瞎猜,结果写了"手牌区",对不上。
+ * 让模型抄一个它没见过的东西,是设计错了。
+ *
+ * 区域只有三种,是个封闭集合,所以按关键词认类别是安全的。真正可能有歧义的是
+ * "装备区有两件,拆哪件" —— 那个仍然要求牌名精确命中,对不上就交回模型。
+ */
+function matchZone(options: string[], zone: string): number {
+  const want = zone.includes('判定') ? '判定区'
+    : zone.includes('装备') ? '装备区'
+      : zone.includes('手牌') ? '手牌(' : '';
+  if (!want) return -1;
+  const hits: number[] = [];
+  options.forEach((o, i) => { if (o.startsWith(want)) hits.push(i); });
+  if (hits.length === 1) return hits[0];
+  if (!hits.length) return -1;
+  // 同一类别里有多个(装备区两件、判定区两张):靠牌名区分,认不出就别猜
+  const named = hits.filter(i => {
+    const body = options[i].slice(want.length).trim();
+    const name = body.split('[')[0].trim();
+    return name && zone.includes(name);
+  });
+  return named.length === 1 ? named[0] : -1;
+}
 
 /**
  * 命中要么唯一、要么等价,否则作废 —— 宁可白写一份计划,也不猜一个"差不多"的。
@@ -96,6 +131,9 @@ export class PlanRunner {
   /** 计划成立时的手牌 id;多出任何一张就作废 */
   private hand = new Set<number>();
   private turn = -1;
+  /** 计划成立时的体力和"被无懈次数",变了说明前提已经不成立 */
+  private hp = 0;
+  private nullified = 0;
 
   /** 这一步是从计划里取的(统计用) */
   used = 0;
@@ -130,6 +168,8 @@ export class PlanRunner {
   private snapshot(game: Game, self: Player) {
     this.hand = new Set(self.hand.map(c => c.id));
     this.turn = game.turnCount;
+    this.hp = self.hp;
+    this.nullified = game.nullified;
   }
 
   private drop(why: DropReason, onDrop?: (why: string) => void) {
@@ -149,9 +189,22 @@ export class PlanRunner {
   ): number[] | null {
     if (!this.steps.length && !this.active) return null;
 
-    // —— 作废条件 ——
+    /*
+     * —— 作废条件 ——
+     *
+     * 统一的判据是「**计划没预料到的事发生了**」,具体有四种:
+     *
+     *  1. 摸到新牌     —— 新牌改变前提(集智/连营/枭姬/无中生有…)
+     *  2. 牌被无懈抵消 —— "拆掉仁王盾再用黑杀",拆桥被无懈之后那张杀的价值就变了
+     *  3. 中途掉血     —— 决斗输了、闪电劈了,后面的进攻计划得重算
+     *  4. 出了计划外的状况 —— 见下面 fallthrough:任何一次"计划答不上来、
+     *     必须问模型"的场合(刚烈让你选掉血还是弃牌、要不要反无懈…),
+     *     都说明局面偏离了计划,剩下的步骤不能闭着眼睛走完
+     */
     if (game.turnCount !== this.turn) { this.drop('换了回合', onDrop); return null; }
     if (self.hand.some(c => !this.hand.has(c.id))) { this.drop('摸到新牌', onDrop); return null; }
+    if (game.nullified !== this.nullified) { this.drop('牌被无懈可击抵消', onDrop); return null; }
+    if (self.hp < this.hp) { this.drop('中途掉血', onDrop); return null; }
 
     // —— 子问题:目标 / 区域,用当前这一步里写好的 ——
     // 注意要先排除"出牌阶段"那道题:新动作一开始,上一步的子问题就结束了。
@@ -162,16 +215,18 @@ export class PlanRunner {
         if (i >= 0 && min <= 1 && max >= 1) { this.used++; return [i]; }
       }
       if (looksLikeZones(options) && this.active.zone) {
-        const i = uniqueMatch(options, this.active.zone);
+        const i = matchZone(options, this.active.zone);
         if (i >= 0 && min <= 1 && max >= 1) { this.used++; return [i]; }
       }
-      // 子问题对不上就只放弃这一步的剩余部分,让模型来答;后续步骤仍然有效
-      this.active = null;
+      this.drop('出了计划外的状况', onDrop);
       return null;
     }
 
+    // 计划还在,却冒出一道它管不着的题(反无懈、刚烈二选一…) —— 局面偏离了,重新规划
+    if (!isPlayAction(question)) { this.drop('出了计划外的状况', onDrop); return null; }
+
     // —— 主问题:下一个出牌动作 ——
-    if (!isPlayAction(question) || min !== 1 || max !== 1) return null;
+    if (min !== 1 || max !== 1) { this.drop('出了计划外的状况', onDrop); return null; }
     this.active = null;                    // 上一步到此为止
     if (!this.steps.length) return null;
     const step = this.steps[0];

@@ -15,7 +15,7 @@
  *     这样滚动窗口把旧战报丢掉也不会让模型失能。
  */
 
-import { ROLE_NAME } from '../core/types.js';
+import { ROLE_NAME, type Role } from '../core/types.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import type { Codec } from './codec.js';
@@ -25,6 +25,8 @@ import { countCards, type CardCount } from './cardCounter.js';
 
 export function buildRules(c: Codec): string {
   const n = (x: string) => c.cardName(x);
+  // 注意:anon 泄漏守卫是**纯子串匹配**,而「杀」是单字牌名 —— "自杀""秒杀"这类
+  // 常用词会被判成泄漏。守卫宁可钝一点也别放宽,这里换个说法就是了。
   // anon 模式下连游戏名都不能出现 —— 说出"三国杀"三个字,
   // 模型就会把整套原版规则从预训练记忆里调出来,代号化就白做了。
   const title = c.usesCodes ? '一个多人卡牌对战游戏' : '三国杀标准版';
@@ -33,6 +35,7 @@ export function buildRules(c: Codec): string {
 
 胜负 lord:击败所有 rebel 和 renegade | rebel:击败 lord(任一 rebel 存活即算赢)| renegade:成为唯一存活者
 奖惩 击败 rebel → 摸3张 | lord 击败 loyalist → lord 弃光所有牌
+阵亡 退出这一局,手牌装备判定牌全部弃置,之后不再行动 —— 胜负只看最后哪个阵营还有人活着,和你囤了多少牌无关
 回合 准备→判定→摸2张→出牌→弃牌(上限=当前hp)→结束
 
 牌的效果
@@ -60,13 +63,42 @@ ${n('方天画戟')}(4) 最后手牌的${n('杀')}可指定至多3目标 | ${n('
 ${n('八卦阵')} 需${n('闪')}时判定红色则视为${n('闪')} | ${n('仁王盾')} 黑色${n('杀')}对你无效
 ${n('防御马')} 他人算与你的距离+1(更难被够到)| ${n('进攻马')} 你算与他人的距离-1(够得更远)
 
-要点 手牌上限=当前hp,残血留不住牌。${n('桃')}稀缺,一般留到濒死。濒死时全场按座次依次问${n('桃')},敌人通常不救。
+要点 **hp 降到 0 就濒死;濒死时全场依次问${n('桃')},没人出就阵亡** —— 主动失去体力的技能在 1hp 时发动等于送命。
+手牌上限=当前hp,所以掉血会让手牌上限跟着降:**失去体力解决不了手牌溢出,只会加重它**。
+${n('桃')}稀缺,一般留到濒死。敌人通常不会救你。
 
 输出 只回一个 JSON:{"thinking":"简短中文推理","choice":[编号]}
 放弃/不选用 []。编号必须来自当次选项。`;
 }
 
 // ————————————————— L1 本局常量 —————————————————
+
+/**
+ * 把 checkGameOver 的判定翻译成"对**你**意味着什么"。
+ *
+ * L0 里写的是通用胜负条件("任一 rebel 存活即算赢"),但它在本局的推论要模型自己推:
+ * 8 人局有 4 个反贼,你死了队友还能赢;1v1 只有你一个反贼,你死了对手直接赢。
+ * 这一步推理实测它没做 —— 而这是**事实不是策略**,写出来不算替它做决定。
+ *
+ * 注意分寸:这里只重述引擎的胜负判定,不给打法建议。"该不该拿命换血"是它要想的事。
+ */
+function stakes(game: Game, self: Player): string {
+  const n = game.players.length;
+  const count = (r: Role) => game.players.filter(p => p.role === r).length;
+  const same = count(self.role);
+  switch (self.role) {
+    case 'lord':
+      return `你阵亡,这局立刻结束 —— 除非只剩内奸独活(那算内奸赢),否则反贼方获胜。`;
+    case 'loyalist':
+      return `主公阵亡你就输。**你自己阵亡不影响主公方获胜**,所以必要时你是可以被换掉的。`;
+    case 'rebel':
+      return same === 1
+        ? `本局只有你一个反贼 —— **你阵亡就等于对手直接获胜**,活着是硬条件。`
+        : `本局共 ${same} 个反贼,只要还有任意一个存活就算反贼方赢。**你自己不一定要活到最后。**`;
+    case 'renegade':
+      return `你要成为**唯一存活者**。任何人先死都不算你赢,${n > 2 ? '所以你需要压制人多的一方、把主公留到最后。' : ''}`;
+  }
+}
 
 export function identityBlock(game: Game, self: Player, c: Codec): string {
   const rows = game.players.map(p => {
@@ -77,6 +109,7 @@ export function identityBlock(game: Game, self: Player, c: Codec): string {
   });
   return `本局 ${game.players.length} 人。你是 ${c.player(self)},身份 ${self.role}(${ROLE_NAME[self.role]}),只有你自己知道。
 武将和技能是公开信息,身份不是。
+${stakes(game, self)}
 
 ${rows.join('\n')}`;
 }
@@ -240,13 +273,18 @@ export function eventsBlock(lines: string[], c: Codec, budget = Infinity): strin
  * 否则模型会以为自己规划的杀一定打得出去,在推理里做出错误的连锁判断。
  */
 export function planHint(): string {
-  // 这里**不能举具体牌名做例子** —— anon 模式下那就是一次泄漏(有测试盯着)。
-  // 说"照抄"本来也比举例更准确:要的就是原样复制,不是照着格式仿写。
+  /*
+   * **这段里不能出现任何牌名或技能名** —— anon 模式下那就是一次泄漏,有测试盯着。
+   * 这条已经栽过两次:第一次是拿具体牌名举例,第二次是列举中断场景时写了
+   * 某张锦囊和某个技能的名字。描述效果、不点名字。
+   */
   return `你还可以顺便写下接下来几步的计划(plan 字段),这样它们会被直接执行,不再逐步问你。
 act 请把选项里的动作文本**一字不差地抄过来**(连花色点数一起);要指定目标就填 target 座位号,不指定填 -1;
-拆/顺要拿哪个区域就照抄区域文本填 zone,不需要填空串。
-计划会在这些时候作废并重新问你:**你摸到新牌**(新牌会改变判断)、某一步对不上当前选项、回合结束。
-所以别把"摸到牌之后再看"这类打算写进计划;先把摸牌的牌用掉,再规划进攻。`;
+拆/顺要拿哪个区域,zone 就填 手牌 / 装备区 / 判定区 —— 对方那个区域有多张时再带上牌名。
+
+计划会在**局面偏离预期**时自动作废、把新局势交回给你重新规划,包括:你摸到新牌、
+你打出的牌被人抵消掉、你中途掉血、或者临时冒出一道计划没覆盖的选择。
+所以:能摸牌的牌先用掉再规划;进攻步骤照写不误,真被打断了会重新问你。`;
 }
 
 export function questionBlock(
