@@ -18,7 +18,7 @@
  * 所有决策统一成"从编号列表里挑 k 个",所以只有一个 schema、一条解析路径、一处兜底。
  */
 
-import type { Agent } from '../core/agent.js';
+import type { Agent, AskKind } from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { BasicAI } from './basicAI.js';
@@ -202,7 +202,7 @@ export class LLMAgent extends ChoiceAgent {
     if (this.system) return this.system;
     const c = this.c(game);
     this.system = [
-      { type: 'text', text: buildRules(c) },
+      { type: 'text', text: buildRules(c, game.mode) },
       { type: 'text', text: identityBlock(game, self, c), cache_control: { type: 'ephemeral' } },
     ];
     return this.system;
@@ -218,9 +218,10 @@ export class LLMAgent extends ChoiceAgent {
   /** 返回 null 表示这次没成功,交给兜底 AI */
   protected async decide(
     game: Game, self: Player, question: string, options: string[], min: number, max: number,
+    kind: AskKind = 'option',
   ): Promise<number[] | null> {
     // 这一步计划里已经写好了?那就直接兑现,一个请求都不发
-    const planned = this.planner.answer(game, self, question, options, min, max, (why) => {
+    const planned = this.planner.answer(game, self, question, options, min, max, kind, (why) => {
       game.log(`  \x1b[90m※ ${this.id} 放弃剩余计划(${why})\x1b[0m`);
     });
     if (planned) {
@@ -235,7 +236,7 @@ export class LLMAgent extends ChoiceAgent {
     const system = this.ensureSystem(game, self);
     const c = this.c(game);
 
-    this.beliefs ??= new BeliefTable(game.players.length);
+    this.beliefs ??= new BeliefTable(game.players.length, game.mode.hidden);
     this.beliefs.sync(game, self);
     // 一轮只催一次复核 —— 一局两百多次决策,大多是"要不要出闪",
     // 每次都让它重算身份纯属烧 token
@@ -345,7 +346,10 @@ export class LLMAgent extends ChoiceAgent {
 
     // 选择合法了才收计划 —— 兜底那次的"计划"多半也是错的
     if (choice !== null && wantPlan) {
-      this.planner.adopt(game, self, newPlan, (why) => {
+      // 把这次选中的选项文本一并交过去 —— 计划的第一步描述的就是它,
+      // 核对上了就能顺带答掉它的目标/区域
+      const chose = choice.length === 1 ? options[choice[0]] : undefined;
+      this.planner.adopt(game, self, newPlan, chose, (why) => {
         if (why !== '模型给的计划为空') game.log(`  \x1b[90m※ ${this.id} 计划未采纳(${why})\x1b[0m`);
       });
     }

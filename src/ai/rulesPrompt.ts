@@ -16,6 +16,7 @@
  */
 
 import { ROLE_NAME, type Role } from '../core/types.js';
+import { identityMode, type GameMode } from '../core/mode.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import type { Codec } from './codec.js';
@@ -23,7 +24,7 @@ import { countCards, type CardCount } from './cardCounter.js';
 
 // ————————————————— L0 规则 —————————————————
 
-export function buildRules(c: Codec): string {
+export function buildRules(c: Codec, mode: GameMode = identityMode): string {
   const n = (x: string) => c.cardName(x);
   // 注意:anon 泄漏守卫是**纯子串匹配**,而「杀」是单字牌名 —— "自杀""秒杀"这类
   // 常用词会被判成泄漏。守卫宁可钝一点也别放宽,这里换个说法就是了。
@@ -33,8 +34,11 @@ export function buildRules(c: Codec): string {
   return `${title}。你会被反复问一个个具体决策,只需从给出的编号选项中挑。
 引擎已经过滤掉所有非法动作 —— 选项里出现的都合法,不必判断"能不能",只需判断"该不该"。
 
-胜负 lord:击败所有 rebel 和 renegade | rebel:击败 lord(任一 rebel 存活即算赢)| renegade:成为唯一存活者
-奖惩 击败 rebel → 摸3张 | lord 击败 loyalist → lord 弃光所有牌
+${mode.name === 'team2v2'
+  ? `胜负 两队各2人,**一队全部阵亡则另一队获胜**。队伍是公开的,没有隐藏身份,也没有击败奖励。
+座次 队伍交替坐成"甲乙乙甲",所以你的两个邻座一个是队友、一个是对手`
+  : `胜负 lord:击败所有 rebel 和 renegade | rebel:击败 lord(任一 rebel 存活即算赢)| renegade:成为唯一存活者
+奖惩 击败 rebel → 摸3张 | lord 击败 loyalist → lord 弃光所有牌`}
 阵亡 退出这一局,手牌装备判定牌全部弃置,之后不再行动 —— 胜负只看最后哪个阵营还有人活着,和你囤了多少牌无关
 回合 准备→判定→摸2张→出牌→弃牌(上限=当前hp)→结束
 
@@ -82,7 +86,7 @@ ${n('桃')}稀缺,一般留到濒死。敌人通常不会救你。
  *
  * 注意分寸:这里只重述引擎的胜负判定,不给打法建议。"该不该拿命换血"是它要想的事。
  */
-function stakes(game: Game, self: Player): string {
+function stakes(game: Game, self: Player, c0: (p: Player) => string): string {
   const n = game.players.length;
   const count = (r: Role) => game.players.filter(p => p.role === r).length;
   const same = count(self.role);
@@ -97,6 +101,19 @@ function stakes(game: Game, self: Player): string {
         : `本局共 ${same} 个反贼,只要还有任意一个存活就算反贼方赢。**你自己不一定要活到最后。**`;
     case 'renegade':
       return `你要成为**唯一存活者**。任何人先死都不算你赢,${n > 2 ? '所以你需要压制人多的一方、把主公留到最后。' : ''}`;
+    case 'blue':
+    case 'red': {
+      /*
+       * 2v2 和身份局最大的区别就在这句话上:**赢的是队伍,不是你**。
+       * 这是 checkOver 的直接推论 —— 只要队伍里还有人活着就算赢,所以替队友
+       * 挡刀、把桃给队友都是正收益。不写出来的话,模型会照着"活到最后"打。
+       */
+      const mates = game.players.filter(p => p !== self && p.role === self.role);
+      const who = mates.map(p => c0(p)).join('、');
+      // 这里不能出现具体牌名 —— anon 模式要靠代号,而 stakes 拿不到 codec 的牌名表
+      return `你和 ${who} 同队(队伍公开,不需要猜)。**只要你们队还有人活着就算赢**:` +
+        `救队友和保自己算同样的分,而你活到最后、队伍全灭仍然是输。`;
+    }
   }
 }
 
@@ -107,9 +124,13 @@ export function identityBlock(game: Game, self: Player, c: Codec): string {
     const sex = p.gender === 'male' ? '男' : '女';
     return `${who}${g} ${p.kingdom} ${sex} hp上限${p.maxHp}\n  技能 ${c.skills(p)}`;
   });
-  return `本局 ${game.players.length} 人。你是 ${c.player(self)},身份 ${self.role}(${ROLE_NAME[self.role]}),只有你自己知道。
-武将和技能是公开信息,身份不是。
-${stakes(game, self)}
+  const hidden = game.mode.hidden;
+  const head = hidden
+    ? `你是 ${c.player(self)},身份 ${self.role}(${ROLE_NAME[self.role]}),只有你自己知道。
+武将和技能是公开信息,身份不是。`
+    : `你是 ${c.player(self)},${ROLE_NAME[self.role]}。武将、技能、队伍都是公开信息。`;
+  return `本局 ${game.players.length} 人(${game.mode.label})。${head}
+${stakes(game, self, p => c.player(p))}
 
 ${rows.join('\n')}`;
 }
@@ -122,7 +143,10 @@ export function situationBlock(game: Game, self: Player, c: Codec): string {
 
   lines.push('角色 hp 手牌 装备 判定区 身份 距你');
   for (const p of game.players) {
-    if (!p.alive) { lines.push(`${c.player(p, self)} 阵亡 身份${p.role}`); continue; }
+    if (!p.alive) {
+      lines.push(`${c.player(p, self)} 阵亡 身份${game.mode.hidden ? p.role : ROLE_NAME[p.role]}`);
+      continue;
+    }
     const eq = p.equipCards.map(x => c.cardName(x.name)).join(',') || '-';
     // 判定区明置:算什么 + 实际是什么都给。顺手牵羊拿走的是实体牌,
     // 只说"乐不思蜀"的话模型不知道自己会拿到一张【闪】
@@ -130,7 +154,9 @@ export function situationBlock(game: Game, self: Player, c: Codec): string {
       const as = c.cardName(game.judgeName(p, x));
       return game.judgeName(p, x) === x.name ? as : `${as}(${c.card(x)})`;
     }).join(',') || '-';
-    const role = p.revealed ? p.role : (p === self ? p.role : '?');
+    // 阵营公开的模式(2v2)用中文队名 —— L1 里写的是"蓝队",这里再写 blue 就是两套叫法
+    const label = (q: typeof p) => (game.mode.hidden ? q.role : ROLE_NAME[q.role]);
+    const role = p.revealed || p === self ? label(p) : '?';
     const dist = p === self ? '-' : String(game.distance(self, p));
     lines.push(`${c.player(p, self)} ${p.hp}/${p.maxHp} ${p.handCount} ${eq} ${jd} ${role} ${dist}`);
   }
@@ -149,6 +175,8 @@ export function situationBlock(game: Game, self: Player, c: Codec): string {
  * 有了它就不需要为了猜身份而保留几十轮的原始战报。
  */
 export function hostilityBlock(game: Game, c: Codec): string {
+  // 这一段唯一的用途是推身份。阵营公开的模式(2v2)里它纯属烧 token
+  if (!game.mode.hidden) return '';
   const items: string[] = [];
   for (const a of game.players) {
     for (const b of game.players) {
@@ -279,6 +307,7 @@ export function planHint(): string {
    * 某张锦囊和某个技能的名字。描述效果、不点名字。
    */
   return `你还可以顺便写下接下来几步的计划(plan 字段),这样它们会被直接执行,不再逐步问你。
+**第一步就写你这次选的这个动作**(把它的目标、区域一并写上,省得再问你一遍),然后接着写下一步、再下一步。
 act 请把选项里的动作文本**一字不差地抄过来**(连花色点数一起);要指定目标就填 target 座位号,不指定填 -1;
 拆/顺要拿哪个区域,zone 就填 手牌 / 装备区 / 判定区 —— 对方那个区域有多张时再带上牌名。
 

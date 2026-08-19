@@ -57,8 +57,14 @@ export interface ActiveSkill extends SkillBase {
   kind: 'active';
   /** 出牌阶段能否点这个技能 */
   canUse: (game: Game, self: Player) => boolean;
-  /** 技能自己负责询问目标、弃牌等一切交互 */
-  onUse: (game: Game, self: Player) => Promise<void>;
+  /**
+   * 技能自己负责询问目标、弃牌等一切交互。
+   *
+   * **返回 false = 玩家中途反悔了**,这次不算发动:限定次数不扣、战报里说明是取消。
+   * 以前一律算发动 —— 点了【离间】之后发现弃不起那张牌,想退回去,
+   * 本回合的一次机会已经没了,而且什么都没发生。
+   */
+  onUse: (game: Game, self: Player) => Promise<void | false>;
 }
 
 /** 转化技的使用场景 */
@@ -75,6 +81,16 @@ export interface ViewAsSkill extends SkillBase {
   kind: 'viewAs';
   /** 该技能能产出的牌名(用于快速判断能否响应),如 ['杀'] */
   produces: string[];
+  /**
+   * 素材从哪里拿。默认 `'hand'` 只认手牌。
+   *
+   * 官方裁定:技能写「一张**红色牌**」(武圣)、「一张**黑色牌**」(奇袭)、
+   * 「一张**♦牌**」(国色)时,装备区里的牌同样算数 —— 关羽可以把赤兔马当【杀】出。
+   * 写明「手**牌**」的(甄姬倾国、丈八蛇矛)才只能用手牌。
+   *
+   * 默认保守取 'hand':漏开一个只是少一种打法,误开则是凭空多出规则里没有的用法。
+   */
+  zone?: 'hand' | 'all';
   /** 哪些实体牌可以被选作素材 */
   cardFilter: (game: Game, self: Player, card: Card, selected: Card[], ctx: ViewAsContext) => boolean;
   /** 需要恰好几张素材牌;返回 0 表示不需要实体牌 */

@@ -12,7 +12,8 @@
  * 两条边界:
  *  - 表里只有模型自己推出来的东西,加上**规则已经公开**的身份(主公明示、阵亡翻开)。
  *    后者标记为 locked,不再让模型浪费推理,也不会被它的猜测覆盖。
- *  - 1v1 没有可推的身份(两人身份从配置就能推出),整个机制关掉。
+ *  - 1v1 没有可推的身份(两人身份从配置就能推出),整个机制关掉;
+ *    **2v2 的队伍是公开的**,同样关掉 —— 那个模式要看的是配合,不是推身份。
  */
 
 import type { Game } from '../core/game.js';
@@ -51,13 +52,13 @@ export interface BeliefRow extends Belief {
 }
 
 export class BeliefTable {
-  /** 1v1 没什么可推的,直接关掉 */
+  /** 1v1 和阵营公开的模式(2v2)没什么可推的,直接关掉 */
   readonly enabled: boolean;
   private m = new Map<number, Belief>();
   private askedRound = 0;
 
-  constructor(playerCount: number) {
-    this.enabled = playerCount > 2;
+  constructor(playerCount: number, hidden = true) {
+    this.enabled = hidden && playerCount > 2;
   }
 
   /** 把规则已经公开的身份写进表并锁定;其余座位保持模型自己的判断 */
@@ -97,7 +98,7 @@ export class BeliefTable {
       // 锁定的格子不接受覆盖 —— 模型说主公是反贼也没用,那是规则给的事实
       if (!cur || cur.locked) continue;
       const role = String(r.role) as RoleGuess;
-      if (role !== 'unknown' && !ROLE_IDS.includes(role as Role)) continue;
+      if (role !== 'unknown' && !(ROLE_IDS as readonly string[]).includes(role)) continue;
       this.m.set(seat, {
         role,
         conf: clamp(Number(r.conf)),

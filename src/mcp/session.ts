@@ -11,6 +11,7 @@
 import '../content/cards.js';
 import '../content/generals.js';
 import { createGame, parseGeneralSpec } from '../core/setup.js';
+import { getMode } from '../core/mode.js';
 import { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import type { Agent } from '../core/agent.js';
@@ -73,6 +74,8 @@ export interface SessionOptions {
   handicap?: number;
   /** 人类玩家坐哪个座位。设了就开本地 socket 等 `npm run join` 接进来 */
   humanSeat?: number;
+  /** 对局模式:'identity'(默认,身份局)或 'team2v2'(4 人组队,队伍公开) */
+  mode?: string;
 }
 
 export class GameSession {
@@ -91,7 +94,10 @@ export class GameSession {
   error: string | null = null;
 
   constructor(opts: SessionOptions = {}) {
-    const players = clamp(opts.players ?? 2, 2, 8);
+    const mode = getMode(opts.mode);
+    // 模式说了算:2v2 只有 4 人这一档,传别的直接归到它支持的档位上
+    const asked = clamp(opts.players ?? 2, 2, 8);
+    const players = mode.sizes.includes(asked) ? asked : mode.sizes[0];
     const seat = clamp(opts.seat ?? 0, 0, players - 1);
     this.seed = opts.seed ?? Math.floor(Math.random() * 1e9);
     const codecMode = opts.codec ?? 'verbose';
@@ -110,6 +116,7 @@ export class GameSession {
       : null;
 
     this.game = createGame({
+      mode,
       playerCount: players,
       seed: this.seed,
       verbose: true,
@@ -166,7 +173,7 @@ export class GameSession {
 
   // ————————————————— 渲染 —————————————————
 
-  rules(): string { return buildRules(this.codec); }
+  rules(): string { return buildRules(this.codec, this.game.mode); }
 
   identity(who: Player = this.me): string {
     return identityBlock(this.game, who, this.codec);

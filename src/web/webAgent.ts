@@ -11,7 +11,9 @@
  * 点手牌选牌",也就是三国杀该有的操作方式。
  */
 
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import type { Card } from '../core/types.js';
@@ -34,8 +36,10 @@ export interface WebPending {
   items: OptionItem[];
   min: number;
   max: number;
-  /** 选中的顺序是否有意义(观星要按顺序放牌堆顶) */
+  /** 选中的顺序是否有意义(观星按顺序放牌堆顶、离间先选的先出【杀】) */
   ordered: boolean;
+  /** 空选表示**反悔**(取消技能),而不是"放弃响应" —— 决定按钮上写"取消"还是"放弃" */
+  cancel: boolean;
 }
 
 /** 中止当前对局时抛的错。调用方靠它区分"用户点了重开"和"真的崩了" */
@@ -56,6 +60,8 @@ export class WebAgent extends ChoiceAgent {
   /** 由各 chooseXxx 在调 super 之前填好,decide() 取用 */
   private nextItems: OptionItem[] | null = null;
   private nextOrdered = false;
+  /** 这道题的"空选"是**反悔**(取消技能)而不是"放弃响应" —— 界面上按钮文案不同 */
+  private nextCancel = false;
 
   constructor(id = 'you', onPending: () => void = () => {}) {
     super();
@@ -80,11 +86,13 @@ export class WebAgent extends ChoiceAgent {
       ? this.nextItems
       : options.map((): OptionItem => ({ kind: 'plain' }));
     const ordered = this.nextOrdered;
+    const cancel = this.nextCancel;
     this.nextItems = null;
     this.nextOrdered = false;
+    this.nextCancel = false;
     if (this.aborted) return Promise.reject(new GameAborted());
     return new Promise<number[]>((resolve, reject) => {
-      this.pending = { question, options, items, min, max, ordered };
+      this.pending = { question, options, items, min, max, ordered, cancel };
       this.resolver = resolve;
       this.rejecter = reject;
       this.onPending();
@@ -145,16 +153,21 @@ export class WebAgent extends ChoiceAgent {
 
   async chooseCards(
     game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string,
+    opts: ChooseCardsOpts = {},
   ): Promise<Card[]> {
     this.nextItems = cards.map((c): OptionItem => ({ kind: 'card', ids: [c.id] }));
-    return super.chooseCards(game, self, cards, min, max, prompt);
+    this.nextCancel = !!opts.cancelable;
+    return super.chooseCards(game, self, cards, min, max, prompt, opts);
   }
 
   async choosePlayers(
     game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string,
+    opts: ChoosePlayersOpts = {},
   ): Promise<Player[]> {
     this.nextItems = cands.map((p): OptionItem => ({ kind: 'player', seat: p.seat }));
-    return super.choosePlayers(game, self, cands, min, max, prompt);
+    // 离间那种"先选的先出杀":选中的先后就是结果,界面要标出 1、2
+    this.nextOrdered = !!opts.ordered;
+    return super.choosePlayers(game, self, cands, min, max, prompt, opts);
   }
 
   async chooseOption(

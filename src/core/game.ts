@@ -11,6 +11,7 @@ import {
 import { Skill, ViewAsContext, ViewAsSkill, limitKey } from './skill.js';
 import type { Agent, CardOption, PlayAction, ResponseCtx } from './agent.js';
 import { getSpec, cardSpecs } from './registry.js';
+import { identityMode, type GameMode } from './mode.js';
 
 /**
  * 待定素材选项的标签:只说"产出什么 + 靠什么技能",不写具体素材 ——
@@ -41,6 +42,8 @@ export class GameOver extends Error {
 
 export interface GameOptions {
   seed?: number;
+  /** 对局模式(身份局 / 2v2…)。默认身份局 */
+  mode?: GameMode;
   /** 日志输出 */
   log?: (msg: string) => void;
   /** 是否输出详细日志 */
@@ -95,6 +98,8 @@ export class Game {
    */
   rng: RNG;
   readonly seed: number;
+  /** 阵营怎么分、谁先手、怎么算赢 —— 引擎自己不认识"主公",全问它 */
+  readonly mode: GameMode;
   /** 公开信息:谁对谁造成过多少伤害(AI 用来推测身份) */
   hostilityLog = new Map<string, number>();
   /**
@@ -118,6 +123,7 @@ export class Game {
 
   constructor(opts: GameOptions = {}) {
     this.seed = opts.seed ?? DEFAULT_SEED;
+    this.mode = opts.mode ?? identityMode;
     this.rng = new RNG(this.seed);
     this.logFn = opts.log ?? (() => {});
     this.verbose = opts.verbose ?? true;
@@ -438,6 +444,14 @@ export class Game {
    * 找出第一个合法的素材组合,当作这条待定选项的"代表"。
    * 它只用来过合法性检查(能不能出、匹不匹配牌型),不代表最终会用哪几张。
    */
+  /**
+   * 转化技的素材池。默认只有手牌;`zone: 'all'` 的技能连装备区一起算 ——
+   * 武圣把赤兔马当【杀】、奇袭把黑色装备当【过河拆桥】都是规则允许的。
+   */
+  private viewAsPool(p: Player, s: ViewAsSkill): Card[] {
+    return s.zone === 'all' ? [...p.hand, ...p.equipCards] : p.hand;
+  }
+
   private firstCombo(
     p: Player, s: ViewAsSkill, pool: Card[], ctx: ViewAsContext,
     ok: (vc: VirtualCard) => boolean,
@@ -492,7 +506,7 @@ export class Game {
       if (!this.skillAvailable(p, s)) continue;
       if (!s.produces.some(n => !pat.names || pat.names.includes(n))) continue;
       if (!s.available(this, p, ctx)) continue;
-      const pool = p.hand.filter(c => s.cardFilter(this, p, c, [], ctx));
+      const pool = this.viewAsPool(p, s).filter(c => s.cardFilter(this, p, c, [], ctx));
       if (s.cardCount === 0) {
         const vc = s.viewAs(this, p, [], ctx);
         if (vc && this.matchPattern(vc, pat)) push(vc);
@@ -556,12 +570,18 @@ export class Game {
 
   /** 要求弃牌 */
   async askForDiscard(
-    p: Player, n: number, prompt: string, opts: { includeEquip?: boolean; min?: number } = {},
+    p: Player, n: number,
+    prompt: string,
+    opts: { includeEquip?: boolean; min?: number; cancelable?: boolean } = {},
   ): Promise<Card[]> {
     const pool = opts.includeEquip ? [...p.hand, ...p.equipCards] : [...p.hand];
     const min = opts.min ?? n;
     if (pool.length < min) return [];
-    const chosen = await this.agentOf(p).chooseCards(this, p, pool, min, n, prompt);
+    // cancelable 交给 agent 自己判断要不要放弃 —— 不能靠把 min 调成 0 来表达,
+    // 那样规则 AI 会每次都交空数组(见 ChooseCardsOpts)
+    const chosen = await this.agentOf(p).chooseCards(this, p, pool, min, n, prompt, {
+      cancelable: opts.cancelable,
+    });
     if (chosen.length < min) return [];
     await this.discardCards(chosen, '弃牌');
     this.log(`  ${p.name} 弃置 ${chosen.map(cardLabel).join('、')}`);
@@ -622,7 +642,8 @@ export class Game {
        * 连判定区都进不去 —— 规则上不成立,实战里也少了"先放着、等判定前再抢无懈"
        * 这层博弈。靠 spec.delayed 认延时锦囊。
        */
-      if (spec.type === 'trick' && spec.nullifiable !== false && !spec.delayed) {
+      if (spec.type === 'trick' && spec.nullifiable !== false
+        && use.nullifiable !== false && !spec.delayed) {
         if (await this.askForNullification(use, t)) {
           this.log(`  ${vcLabel(use.card)} 对 ${t.name} 的效果被【无懈可击】抵消`);
           continue;
@@ -766,34 +787,18 @@ export class Game {
     await this.discardCards(cards, '阵亡弃牌');
     p.dead = true;
 
-    // 奖惩
-    if (killer && killer.alive) {
-      if (p.role === 'rebel') {
-        this.log(`  ${killer.name} 击杀反贼,摸三张牌`);
-        await this.drawCards(killer, 3, '击杀奖励');
-      } else if (p.role === 'loyalist' && killer.role === 'lord') {
-        this.log(`  主公误杀忠臣,弃置所有牌`);
-        await this.discardCards([...killer.hand, ...killer.equipCards], '误杀惩罚');
-      }
-    }
+    // 奖惩由模式定 —— 2v2 没有击杀奖励(有的话会诱导 AI 抢人头)
+    await this.mode.onKill(this, p, killer && killer.alive ? killer : null);
     this.checkGameOver();
   }
 
   checkGameOver() {
-    const alive = this.alivePlayers;
-    const lord = this.players.find(p => p.role === 'lord')!;
-    if (!lord.alive) {
-      // 内奸单独存活 -> 内奸胜;否则反贼胜
-      if (alive.length === 1 && alive[0].role === 'renegade') {
-        throw new GameOver([alive[0]], '内奸获胜');
-      }
-      throw new GameOver(this.players.filter(p => p.role === 'rebel'), '反贼获胜');
-    }
-    const hasEnemy = alive.some(p => p.role === 'rebel' || p.role === 'renegade');
-    if (!hasEnemy) {
-      throw new GameOver(this.players.filter(p => p.role === 'lord' || p.role === 'loyalist'), '主忠获胜');
-    }
+    const r = this.mode.checkOver(this);
+    if (r) throw new GameOver(r.winners, r.reason);
   }
+
+  /** 两个座位是不是一伙的 —— 界面和规则 AI 都用它 */
+  ally(a: Player, b: Player): boolean { return this.mode.ally(a, b); }
 
   // ————————————————— 判定 —————————————————
 
@@ -820,13 +825,13 @@ export class Game {
   async setupAndRun(): Promise<{ winners: Player[]; reason: string }> {
     try {
       await this.trigger('GameStart', {});
-      let idx = 0;
-      const lord = this.players.find(p => p.role === 'lord')!;
-      idx = this.players.indexOf(lord);
+      // 先手由模式决定(身份局是主公,2v2 是 0 号位),同时也是"一轮"的锚点
+      const first = this.mode.first(this.players);
+      let idx = this.players.indexOf(first);
       let guard = 0;
       while (!this.finished && guard++ < 500) {
         const p = this.players[idx % this.players.length];
-        if (p === lord) {
+        if (p === first) {
           this.round++;
           this.roundStartLine[this.round] = this.logLines.length;
           for (const q of this.players) q.clearMarks('round:');
@@ -954,7 +959,7 @@ export class Game {
       if (s.kind !== 'viewAs') continue;
       if (!this.skillAvailable(p, s)) continue;
       if (!s.available(this, p, ctx)) continue;
-      const pool = p.hand.filter(c => s.cardFilter(this, p, c, [], ctx));
+      const pool = this.viewAsPool(p, s).filter(c => s.cardFilter(this, p, c, [], ctx));
       if (s.cardCount === 0) {
         const vc = s.viewAs(this, p, [], ctx); if (vc) consider(vc);
       } else if (s.cardCount === 1) {
@@ -1017,6 +1022,16 @@ export class Game {
   }
 
   private async playPhase(p: Player) {
+    /*
+     * 本阶段每个技能被反悔了几次。
+     *
+     * 取消不扣次数是对的(点错了不该赔上一整回合),但"可以无限重选"会把出牌阶段
+     * 变成死循环 —— 测试里那个总是返回最少张数的假客户端就是这样:点技能 → 交空数组
+     * → 取消 → 技能又出现在菜单里 → 再点…… 一个回合能耗掉上百次调用。
+     * 所以给几次反悔的余地,超了就把它从**本阶段**菜单里摘掉(下回合照常)。
+     */
+    const canceled = new Map<Skill, number>();
+    const CANCEL_LIMIT = 2;
     for (let guard = 0; guard < 100 && p.alive; guard++) {
       const actions: PlayAction[] = [];
       for (const o of this.enumerateUsable(p)) {
@@ -1025,17 +1040,32 @@ export class Game {
       for (const s of p.allSkills) {
         if (s.kind !== 'active') continue;
         if (!this.skillAvailable(p, s)) continue;
+        if ((canceled.get(s) ?? 0) >= CANCEL_LIMIT) continue;
         if (!s.canUse(this, p)) continue;
         actions.push({ kind: 'skill', skill: s, label: `【${s.name}】` });
       }
       actions.push({ kind: 'end', label: '结束出牌阶段' });
+      /*
+       * 只剩"结束出牌阶段"时,ChoiceAgent 会直接替他选掉、不发问 —— 对模型是省一次调用,
+       * 但对真人就成了"回合莫名其妙自己结束了"。所以这里补一行战报说清为什么。
+       */
+      if (actions.length === 1) this.log(`  ${p.name} 没有可用的牌或技能,出牌阶段结束`);
       const idx = await this.agentOf(p).choosePlayAction(this, p, actions);
       const act = actions[Math.max(0, Math.min(idx, actions.length - 1))];
       if (act.kind === 'end') return;
       if (act.kind === 'skill') {
-        this.consumeLimit(p, act.skill);
         this.log(`${p.name} 发动【${act.skill.name}】`);
-        await act.skill.onUse(this, p);
+        // 次数在**发动成功之后**才扣。中途反悔(返回 false)不该白白吃掉一次机会 ——
+        // 技能里那些 `if (!chosen.length) return` 的早退分支同理
+        const r = await act.skill.onUse(this, p);
+        if (r === false) {
+          const n = (canceled.get(act.skill) ?? 0) + 1;
+          canceled.set(act.skill, n);
+          this.log(`  ${p.name} 取消了【${act.skill.name}】` +
+            (n >= CANCEL_LIMIT ? ',本阶段不再提示(次数没有消耗)' : ',次数没有消耗'));
+        } else {
+          this.consumeLimit(p, act.skill);
+        }
         continue;
       }
       // 多素材转化:先问用哪几张,再问目标

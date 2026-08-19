@@ -9,9 +9,10 @@
  * 调用方不需要再自己检查一遍。浏览器传上来的 JSON 是不可信输入,这就是那道闸门。
  */
 
-import { checkRoles, ROLE_TABLE, DUEL_HANDICAP } from '../core/setup.js';
+import { DUEL_HANDICAP } from '../core/setup.js';
+import { getMode, MODES, identityMode } from '../core/mode.js';
 import { generals } from '../core/registry.js';
-import type { Role } from '../core/types.js';
+import { ROLE_NAME, type Role } from '../core/types.js';
 
 export type Control = 'human' | 'llm' | 'rule';
 export const EFFORTS = ['low', 'medium', 'high'] as const;
@@ -31,6 +32,8 @@ export interface SeatConfig {
 }
 
 export interface GameConfig {
+  /** 对局模式,见 core/mode.ts。'identity'(身份局)或 'team2v2' */
+  mode: string;
   playerCount: number;
   seed: number;
   /** 1v1 的后手补牌。null = 用默认值 */
@@ -47,6 +50,12 @@ export interface GameConfig {
 
 const isInt = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x);
 
+/** 人数范围写成人话:连续的写 "2~8",否则逐个列 */
+function sizeText(sizes: number[]): string {
+  const contiguous = sizes.length > 1 && sizes.every((v, i) => i === 0 || v === sizes[i - 1] + 1);
+  return contiguous ? `${sizes[0]}~${sizes[sizes.length - 1]}` : sizes.join('/');
+}
+
 function pickOne<T extends string>(v: unknown, allowed: readonly T[], def: T, what: string): T {
   if (v === undefined || v === null || v === '') return def;
   if (typeof v === 'string' && (allowed as readonly string[]).includes(v)) return v as T;
@@ -60,8 +69,13 @@ export function normalizeConfig(raw: unknown): GameConfig {
   if (!raw || typeof raw !== 'object') throw new Error('配置必须是一个对象');
   const c = raw as Record<string, unknown>;
 
+  const modeName = pickOne(c.mode, Object.keys(MODES), identityMode.name, '对局模式');
+  const mode = getMode(modeName);
+
   const n = c.playerCount;
-  if (!isInt(n) || !ROLE_TABLE[n]) throw new Error(`人数只能是 2~8,收到的是 ${JSON.stringify(n)}`);
+  if (!isInt(n) || !mode.sizes.includes(n)) {
+    throw new Error(`${mode.label}的人数只能是 ${sizeText(mode.sizes)},收到的是 ${JSON.stringify(n)}`);
+  }
 
   const seatsRaw = c.seats;
   if (!Array.isArray(seatsRaw) || seatsRaw.length !== n) {
@@ -89,8 +103,15 @@ export function normalizeConfig(raw: unknown): GameConfig {
 
     let role: Role | null = null;
     if (typeof s.role === 'string' && s.role) {
-      if (!['lord', 'loyalist', 'rebel', 'renegade'].includes(s.role)) {
-        throw new Error(`${i} 号位的身份不认识:${s.role}`);
+      /*
+       * 认哪些名字由模式说了算 —— 2v2 里没有"主公",身份局里没有"蓝队"。
+       * 注意这里比的是**整个模式**用得到的身份,不是当前人数那一档:
+       * 3 人局没有忠臣,但 loyalist 是个正经身份,该报"名额不够"而不是"不认识",
+       * 而名额那一关归 mode.check 管(下面),别在这里抢它的活。
+       */
+      if (!mode.sizes.some(k => mode.table(k).includes(s.role as Role))) {
+        throw new Error(`${i} 号位的身份不认识:${s.role}(${mode.label}可选 ` +
+          `${[...new Set(mode.sizes.flatMap(k => mode.table(k)))].map(r => ROLE_NAME[r]).join('/')})`);
       }
       role = s.role as Role;
       fixedRoles[i] = role;
@@ -108,7 +129,7 @@ export function normalizeConfig(raw: unknown): GameConfig {
   }
 
   // 身份名额对不对,交给引擎那份唯一的判定,别在这里抄一遍规则
-  checkRoles(fixedRoles, n);
+  mode.check(fixedRoles, n);
 
   const viewerRaw = c.viewer;
   let viewer: number | null = null;
@@ -124,7 +145,7 @@ export function normalizeConfig(raw: unknown): GameConfig {
   const handicap = isInt(c.handicap) && c.handicap >= 0 ? c.handicap : (n === 2 ? DUEL_HANDICAP : null);
 
   return {
-    playerCount: n, seed, handicap, viewer,
+    mode: modeName, playerCount: n, seed, handicap, viewer,
     reveal: c.reveal === true,
     speed, record: c.record === true, seats,
   };
@@ -154,9 +175,9 @@ export function startingHandOf(cfg: GameConfig): number[] | undefined {
 }
 
 /** 默认配置:全规则 AI,谁都不指定 */
-export function defaultConfig(playerCount = 3): GameConfig {
+export function defaultConfig(playerCount = 3, mode = identityMode.name): GameConfig {
   return normalizeConfig({
-    playerCount,
+    mode, playerCount,
     seed: Math.floor(Math.random() * 1e9),
     viewer: null, reveal: false, speed: 500, record: false,
     seats: Array.from({ length: playerCount }, () => ({ control: 'rule' })),

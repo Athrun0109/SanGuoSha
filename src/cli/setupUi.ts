@@ -81,6 +81,7 @@ async function run(
   const recLog = rec?.logFn(m => console.log(m));
 
   game = createGame({
+    mode: cfg.mode,
     playerCount: cfg.playerCount,
     seed: cfg.seed,
     fixedGenerals,

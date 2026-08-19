@@ -240,3 +240,83 @@ test('战报超过 200 行之后仍然能察觉到更新', async () => {
   assert.equal(new Set(past.map(s => s.total)).size, past.length,
     'logTotal 必须是单调增的 —— 前端全靠它判断有没有新内容');
 });
+
+/**
+ * 「可选」和「选中」必须是两种一眼能分开的样式。
+ *
+ * 真实反馈:弃牌时所有手牌都镶着蓝框,玩家看不出自己勾了哪几张 —— 因为当时
+ * `.pick`(能点)和 `.on`(选中)画的是同一套"蓝框 + 淡蓝底"。现在分成两条轴:
+ * 深浅表示能不能点,光圈表示选没选中。这两条都容易在改样式时被顺手合回去,
+ * 所以这里从 CSS 和渲染逻辑两头钉。
+ */
+test('界面:能不能点用深浅表示,选没选中用光圈表示', () => {
+  const html = fs.readFileSync(
+    path.join(fileURLToPath(new URL('../web/client.html', import.meta.url))), 'utf8');
+
+  // ——— CSS:光圈只能属于"选中" ———
+  const rules = [...html.matchAll(/^\s*([^\s{][^{]*)\{([^}]*)\}/gm)]
+    .map(m => ({ sel: m[1].trim(), body: m[2] }))
+    .filter(r => /box-shadow:\s*0 0 0/.test(r.body));
+  assert.ok(rules.length >= 3, '应该有若干条光圈规则');
+  for (const r of rules) {
+    assert.ok(/\.on\b/.test(r.sel),
+      `光圈只该用来表示"选中",但 "${r.sel}" 也画了光圈 —— 这正是当初分不清的原因`);
+  }
+  // 反过来:压灰的样式必须存在,否则"不可选"就没有任何表现
+  assert.match(html, /\.card\.off\b/, '手牌需要一个"点不了"的灰态');
+  assert.match(html, /\.skill\.off\b/, '技能需要一个"点不了"的灰态');
+
+  // ——— 渲染:三种状态各走各的 class ———
+  // 文件是 CRLF,先统一掉再按行首的 } 找函数尾巴
+  const lf = html.replace(/\r\n/g, '\n');
+  const grab = (name: string) => {
+    const m = lf.match(new RegExp(String.raw`\nfunction ${name}\([\s\S]*?\n\}\n`));
+    assert.ok(m, `client.html 里找不到 ${name}()`);
+    return m[0];
+  };
+  type Item = { kind: string; ids?: number[]; seat?: number };
+  const mk = (opts: Item[] | null, chosen: number[] = []) => {
+    const p = opts === null ? null : { options: opts.map(String), items: opts, ordered: false };
+    const deps: Record<string, unknown> = {
+      esc: (x: unknown) => String(x),
+      pend: () => p,
+      sel: chosen,
+      itemAt: (q: typeof p, i: number) => (q?.items && q.items[i]) || { kind: 'plain' },
+      idxOfCard: (id: number) => (p ? p.items.findIndex(
+        it => it.kind === 'card' && it.ids?.length === 1 && it.ids[0] === id) : -1),
+    };
+    const keys = Object.keys(deps);
+    return new Function(...keys,
+      `${grab('cardHtml')}${grab('anySeatPickable')}return { cardHtml, anySeatPickable };`,
+    )(...keys.map(k => deps[k])) as {
+      cardHtml: (c: unknown, mode: string) => string;
+      anySeatPickable: () => boolean;
+    };
+  };
+  const card = { id: 7, name: '闪', suit: '♥', rank: '2', red: true };
+  const asOpt = [{ kind: 'card', ids: [7] }];
+
+  // 没题在等着答 —— 手牌就是手牌,不该发灰,也不该显得能点
+  let h = mk(null).cardHtml(card, 'hand');
+  assert.doesNotMatch(h, /\boff\b/, '没有待答问题时不该把手牌压灰');
+  assert.doesNotMatch(h, /\bpick\b/);
+
+  // 有题、这张牌是选项 —— 可点,但还没选中
+  h = mk(asOpt).cardHtml(card, 'hand');
+  assert.match(h, /\bpick\b/);
+  assert.doesNotMatch(h, /\bon\b/, '仅仅"能点"不该带上选中的样式');
+
+  // 有题、这张牌不是选项 —— 压灰
+  h = mk([{ kind: 'card', ids: [99] }]).cardHtml(card, 'hand');
+  assert.match(h, /\boff\b/, '点不了的手牌要压灰,否则看起来哪张都能出');
+  assert.doesNotMatch(h, /\bpick\b/);
+
+  // 选中了 —— 光圈那一档
+  h = mk(asOpt, [0]).cardHtml(card, 'hand');
+  assert.match(h, /\bon\b/);
+
+  // 角色框只在"这道题要选人"时才压灰(它大半时间是在展示血量装备距离)
+  assert.equal(mk([{ kind: 'card', ids: [7] }]).anySeatPickable(), false);
+  assert.equal(mk([{ kind: 'player', seat: 2 }]).anySeatPickable(), true);
+  assert.equal(mk(null).anySeatPickable(), false);
+});

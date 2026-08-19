@@ -8,6 +8,8 @@
     --line-soft: #ebebeb;
     --ink: #111;
     --ink-dim: #767676;
+    /* 比 ink-dim 再淡一档:表示"现在点不了",要一眼看出是被压掉的 */
+    --dim2: #b3b3b3;
     --red: #c0392b;
     --amber: #b45309;
     --sel: #2563eb;
@@ -85,9 +87,14 @@
   .seat.pick {
     cursor: pointer;
     border-color: var(--sel) !important; border-left-color: var(--sel) !important;
-    box-shadow: 0 0 0 3px #2563eb55;
   }
-  .seat.pick:hover { background: #eff6ff; box-shadow: 0 0 0 4px #2563eb99; }
+  .seat.pick:hover { background: #eff6ff; }
+  /*
+   * 角色框的压灰**只在"这道题要选人"时才上**(见 seatHtml)。
+   * 角色框大半时间是在展示信息(血量、装备、距离),整局发灰会把这份信息一起压掉;
+   * 而真要选目标的时候,灰掉够不着的人恰恰是最有用的对比。
+   */
+  .seat.off { opacity: .42; }
   .seat.on { box-shadow: 0 0 0 4px var(--sel); background: #dbeafe; }
   .seat .ord {
     position: absolute; top: -9px; left: -9px; width: 19px; height: 19px;
@@ -111,6 +118,9 @@
   .role.rebel { background: var(--red); }
   .role.renegade { background: #7c3aed; }
   .role.unknown { background: #fff; color: var(--ink-dim); border: 1px dashed var(--line); }
+  /* 2v2 的两队。队伍是公开的,所以这两个色块一局到底都在 */
+  .role.blue { background: #2563eb; }
+  .role.red { background: #dc2626; }
 
   .badge {
     position: absolute; top: -8px; right: 8px;
@@ -135,9 +145,27 @@
   .card.red .s { color: var(--red); }
   .cards { display: flex; flex-wrap: wrap; gap: 4px; }
 
-  .card.pick { cursor: pointer; border-color: var(--sel); border-width: 2px; background: #f5f9ff; }
-  .card.pick:hover { background: #dbeafe; }
-  .card.on { border-color: var(--sel); border-width: 2px; background: #dbeafe; }
+  /*
+   * **可选/不可选** 和 **选中/未选中** 是两条互不相干的轴,以前被画成了同一种样式
+   * (都是"蓝框 + 淡蓝底")。后果:弃牌时全部手牌都镶着蓝框,自己到底勾了哪几张
+   * 完全看不出来。现在分开:
+   *
+   *   可选   黑字、能点、悬停才提示        不可选  整块压灰
+   *   选中   **蓝色光圈**(box-shadow)   未选中  没有光圈
+   *
+   * 定下的规矩:光圈从此只代表"选中",别再拿它当"这个能点"用。
+   */
+  /* 浅蓝描边只是"这个是活的"的提示,和光圈完全不是一回事 ——
+     弃牌那种全部可选的场合,没有它就一点"现在该点了"的迹象都没有 */
+  .card.pick { cursor: pointer; color: var(--ink); border-color: #b9cdf0; }
+  .card.pick:hover { border-color: var(--sel); background: #f0f6ff; }
+  /* 压灰只在**有待答问题**时才加(见 cardHtml),平时的牌不该发灰 */
+  .card.off { color: var(--dim2); border-color: var(--line-soft); background: #fcfcfc; }
+  .card.off .s, .card.off .n, .card.off.red .s { color: var(--dim2); }
+  .card.on {
+    color: var(--ink); border-color: var(--sel); border-width: 2px;
+    background: #dbeafe; box-shadow: 0 0 0 3px #2563eb66;
+  }
   .card .ord {
     position: absolute; top: -8px; left: -8px; width: 17px; height: 17px;
     border-radius: 50%; background: var(--sel); color: #fff;
@@ -160,9 +188,15 @@
     border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px;
     background: #fff; font-size: 12px;
   }
-  .skill.pick { cursor: pointer; border-color: var(--sel); border-width: 2px; background: #f5f9ff; }
-  .skill.pick:hover { background: #eff6ff; }
-  .skill.on { border-color: var(--sel); border-width: 2px; background: #dbeafe; }
+  /* 同上:可选=黑字,不可选=灰字,选中=蓝光圈。
+     被动技(闭月、遗计这类不用自己发动的)因此一局到底都是灰的 —— 本来就点不了 */
+  .skill.pick { cursor: pointer; color: var(--ink); border-color: #b9cdf0; }
+  .skill.pick:hover { border-color: var(--sel); background: #f0f6ff; }
+  .skill.off { color: var(--dim2); border-color: var(--line-soft); background: #fcfcfc; }
+  .skill.on {
+    color: var(--ink); border-color: var(--sel); border-width: 2px;
+    background: #dbeafe; box-shadow: 0 0 0 3px #2563eb66;
+  }
 
   /* ——— 操作条:贴在自己面板的右边 ——— */
   #act {
@@ -179,7 +213,10 @@
     border-radius: 4px; padding: 3px 11px; background: #fff; cursor: pointer;
   }
   #act button:hover:not(:disabled) { background: #f0f0f0; }
-  #act button.on { border-color: var(--sel); border-width: 2px; background: #dbeafe; }
+  #act button.on {
+    border-color: var(--sel); border-width: 2px;
+    background: #dbeafe; box-shadow: 0 0 0 3px #2563eb66;
+  }
   #act button:disabled { opacity: .45; cursor: default; }
   #act .go { background: #111; color: #fff; border-color: #111; }
   #act .go:hover:not(:disabled) { background: #333; }
@@ -369,6 +406,11 @@ function idxOfSeat(seat) {
     return it.kind === 'player' && it.seat === seat;
   });
 }
+/** 这道题是不是"选角色" —— 决定要不要把够不着的角色框压灰 */
+function anySeatPickable() {
+  const p = pend(); if (!p) return false;
+  return p.options.some((_, i) => itemAt(p, i).kind === 'player');
+}
 function idxOfSkill(name) {
   const p = pend(); if (!p) return -1;
   return p.options.findIndex((_, i) => {
@@ -415,6 +457,10 @@ function clickable() {
   const meSeat = st.viewer;
   const mine = meSeat === null ? [] : (st.seats[meSeat].hand || []);
   mine.forEach(c => { const i = idxOfCard(c.id); if (i >= 0) out.add(i); });
+  // 自己的装备同样点得到(离间弃装备、武圣拿装备当素材)
+  if (meSeat !== null) {
+    st.seats[meSeat].equips.forEach(e => { const i = idxOfCard(e.card.id); if (i >= 0) out.add(i); });
+  }
   st.seats.forEach(s => { const i = idxOfSeat(s.seat); if (i >= 0) out.add(i); });
   if (meSeat !== null) {
     st.seats[meSeat].skills.forEach(n => { const i = idxOfSkill(n); if (i >= 0) out.add(i); });
@@ -467,7 +513,9 @@ function cardHtml(c, mode) {
   if (mode === 'hand') {
     const i = idxOfCard(c.id);
     const at = sel.indexOf(i);
+    // 有题在等着答,而这张牌不在选项里 —— 压灰。没题的时候手牌一律正常显示
     if (i >= 0) cls.push('pick');
+    else if (pend()) cls.push('off');
     if (at >= 0) {
       cls.push('on');
       if (pend() && pend().ordered) ord = `<span class="ord">${at + 1}</span>`;
@@ -489,7 +537,9 @@ function seatHtml(s, self) {
   const cls = ['seat', s.kingdom];
   if (s.isCurrent) cls.push('cur');
   if (!s.alive) cls.push('dead');
+  // 只有"这道题要选人"时才把够不着的人压灰 —— 别的时候角色框是在展示信息
   if (i >= 0) cls.push('pick');
+  else if (anySeatPickable()) cls.push('off');
   if (at >= 0) cls.push('on');
 
   const role = s.roleName
@@ -522,8 +572,13 @@ function seatHtml(s, self) {
       s.knownHand.map(c => cardHtml(c, false)).join('') + `</span></div>`;
   }
   if (s.equips.length) {
+    /*
+     * **自己的装备要能点。**
+     * 离间可以弃装备区的牌、武圣/奇袭可以拿装备当素材 —— 引擎早就把它们放进选项了,
+     * 可这里一律按只读画,于是玩家看着自己的装备发灰、只能去操作条里找同名按钮。
+     */
     h += `<div class="row"><span class="k">装备</span><span class="cards">` +
-      s.equips.map(e => cardHtml(e.card, false)).join('') + `</span></div>`;
+      s.equips.map(e => cardHtml(e.card, self ? 'hand' : false)).join('') + `</span></div>`;
   }
   if (s.judge.length) {
     h += `<div class="row"><span class="k">判定</span>` +
@@ -532,7 +587,9 @@ function seatHtml(s, self) {
   if (self) {
     h += `<div class="row"><span class="k">技能</span>` + s.skills.map(n => {
       const si = idxOfSkill(n), sa = sel.indexOf(si);
-      const c = ['skill']; if (si >= 0) c.push('pick'); if (sa >= 0) c.push('on');
+      const c = ['skill'];
+      if (si >= 0) c.push('pick'); else if (pend()) c.push('off');
+      if (sa >= 0) c.push('on');
       return `<span class="${c.join(' ')}"${si >= 0 ? ` data-opt="${si}"` : ''}>${esc(n)}</span>`;
     }).join(' ') + `</div>`;
     h += `<div class="row hand"><span class="k">手牌</span><span class="cards">` +
@@ -554,6 +611,8 @@ function actHtml() {
     : p.min === 0 ? `选 0~${p.max} 个` : `选 ${p.min}~${p.max} 个`;
 
   let h = `<div class="q">${esc(p.question)}</div>`;
+  // 顺序有意义的题(离间先选的先出【杀】、观星按顺序放牌堆顶):选中的会标 1、2…
+  if (p.ordered && p.max > 1) h += `<div class="where">选中的会按点击先后编号,顺序有意义</div>`;
 
   /*
    * 可点的东西在棋盘上、不在操作条里时,**必须明说**。
@@ -580,7 +639,9 @@ function actHtml() {
   }
   h += `<div class="opts">` +
     `<button class="go" id="go" ${ok && !sending ? '' : 'disabled'}>${sending ? '提交中…' : '确定'}</button>` +
-    (p.min === 0 ? `<button id="pass" ${sending ? 'disabled' : ''}>放弃</button>` : '') +
+    (p.min === 0
+      ? `<button id="pass" ${sending ? 'disabled' : ''}>${p.cancel ? '取消' : '放弃'}</button>`
+      : '') +
     `<span class="cnt">${range},已选 ${sel.length}</span>` +
     `</div>`;
   if (errMsg) h += `<div class="err">${esc(errMsg)}</div>`;

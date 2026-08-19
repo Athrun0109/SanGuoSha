@@ -10,7 +10,9 @@
  *   3) scoreAction()—— 出牌阶段的动作评分(主决策)
  */
 
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import { agentRng, type Game, type RNG } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { Card, Suit, SUITS, VirtualCard, suitColor } from '../core/types.js';
@@ -54,6 +56,11 @@ export class BasicAI implements Agent {
   /** > 0 友好,< 0 敌对,绝对值表示确信程度 */
   attitude(game: Game, self: Player, other: Player): number {
     if (other === self) return 100;
+    /*
+     * 阵营公开的模式(2v2)里没什么可推的,而且下面整套推断都是围绕"主公是谁"
+     * 展开的 —— 那种局根本没有主公,照跑会拿到 undefined。
+     */
+    if (!game.mode.hidden) return game.ally(self, other) ? 100 : -100;
     const lord = game.players.find(p => p.role === 'lord')!;
     const myRole = self.role;
 
@@ -268,6 +275,7 @@ export class BasicAI implements Agent {
 
   async choosePlayers(
     game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string,
+    opts: ChoosePlayersOpts = {},
   ): Promise<Player[]> {
     // 出牌阶段已经算好目标了
     if (this.pendingTargets && this.pendingTargets.length >= min) {
@@ -279,6 +287,12 @@ export class BasicAI implements Agent {
     const sorted = [...cands].sort((a, b) => friendly
       ? this.attitude(game, self, b) - this.attitude(game, self, a)
       : this.threat(game, self, b) - this.threat(game, self, a));
+    /*
+     * `opts.ordered` 时(离间:先选的先出【杀】)排在前面是**吃亏**的位置 ——
+     * 先出杀的一方多耗一张牌、接不上就先掉血。上面那次排序正好是威胁降序,
+     * 于是最该被消耗的敌人自然排在前面,不用再动。写下来是为了免得
+     * 以后有人把排序改成升序,却没意识到那会把优势送给对手。
+     */
     return sorted.slice(0, Math.max(min, Math.min(max, min)));
   }
 
@@ -297,10 +311,10 @@ export class BasicAI implements Agent {
       return bi;
     };
 
-    // 替主公出牌(护驾 / 激将)
+    // 替主公出牌(护驾 / 激将)。没有主公的模式里这两个主公技不会触发
     if (/护驾|激将/.test(prompt)) {
-      const lord = game.players.find(p => p.role === 'lord')!;
-      return this.attitude(game, self, lord) > 30 ? cheapest() : -1;
+      const lord = game.players.find(p => p.role === 'lord');
+      return lord && this.attitude(game, self, lord) > 30 ? cheapest() : -1;
     }
 
     switch (ctx.purpose) {

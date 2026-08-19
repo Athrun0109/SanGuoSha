@@ -1,6 +1,8 @@
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { Card, SUITS, Suit, cardLabel, KINGDOM_NAME, ROLE_NAME } from '../core/types.js';
@@ -214,10 +216,13 @@ export class HumanAgent implements Agent {
 
   async choosePlayers(
     game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string,
+    opts: ChoosePlayersOpts = {},
   ): Promise<Player[]> {
     const labels = cands.map(p =>
       `[${p.seat}] ${p.general.name} ${bar(p.hp, p.maxHp)} 手牌${p.handCount}` + (p === self ? '(你)' : ''));
-    const r = await this.choose(game, self, prompt, labels, min, max);
+    // 顺序有意义时要说清楚:输入的先后就是结果的先后
+    const q = opts.ordered && max > 1 ? `${prompt}(按顺序输入,先写的排在前面)` : prompt;
+    const r = await this.choose(game, self, q, labels, min, max);
     return r.map(i => cands[i]);
   }
 

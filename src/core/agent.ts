@@ -62,6 +62,40 @@ export interface OptionCtx {
   tag?: string;
 }
 
+/**
+ * 决策的种类,对应下面 Agent 上的 7 个方法。
+ *
+ * 这不只是给记录用的标签 —— 它区分了两类完全不同的提问:
+ *   **你这个动作的参数**  cards / players(仁德交哪几张、给谁,杀打谁)
+ *   **突然轮到你表态**    response / option(要不要出闪、要不要无懈、刚烈让你二选一)
+ * 计划执行器靠这条线决定"剩下的计划还算不算数",见 ai/plan.ts。
+ */
+export interface ChooseCardsOpts {
+  /**
+   * 允许交空数组表示**反悔**(界面上就是那颗"取消"按钮)。
+   *
+   * 注意不能靠"把 min 调成 0"来表达 —— 规则 AI 的 chooseCards 就是老老实实返回
+   * min 张,min=0 时它每次都交空数组、每次都取消,出牌阶段直接空转到 guard 上限
+   * (实测 8 人局 200 局从 1.4s 涨到 2.3s)。所以要用一个它可以**忽略**的旗标。
+   */
+  cancelable?: boolean;
+}
+
+export interface ChoosePlayersOpts {
+  /**
+   * **选人的先后顺序是有意义的**(离间:先选的那名先出【杀】)。
+   *
+   * 打开之后引擎不会再替玩家"只有一个合法解就直接选掉" —— 候选正好等于要选的人数时,
+   * 组合虽然唯一,**排列却不唯一**,而排列正是这里要问的东西。
+   * 真实事故:场上只剩两名男性时,离间的选人题被当成唯一解跳过,于是永远按座位号排,
+   * 先出杀的劣势位固定落在座位靠前的那个人身上,玩家连点都点不到。
+   */
+  ordered?: boolean;
+}
+
+export type AskKind =
+  | 'playAction' | 'response' | 'cards' | 'players' | 'option' | 'arrange' | 'suit';
+
 export interface Agent {
   readonly id: string;
   /** 是否为人类(引擎据此决定要不要打印提示) */
@@ -78,12 +112,13 @@ export interface Agent {
 
   /** 从一堆牌里选 min..max 张(弃牌、拆牌、素材…) */
   chooseCards(
-    game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string,
+    game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string, opts?: ChooseCardsOpts,
   ): Promise<Card[]>;
 
   /** 选 min..max 名角色 */
   choosePlayers(
     game: Game, self: Player, candidates: Player[], min: number, max: number, prompt: string,
+    opts?: ChoosePlayersOpts,
   ): Promise<Player[]>;
 
   /** 二选一 / 多选一(文字选项);返回下标,允许返回 -1 表示放弃(当 cancelable) */

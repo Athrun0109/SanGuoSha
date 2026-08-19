@@ -48,10 +48,14 @@ server.registerTool('new_game', {
   title: '开一局三国杀',
   description: '开始新对局。返回规则、你的身份武将、当前局面和第一个待决策问题。会覆盖正在进行的对局。',
   inputSchema: {
+    mode: z.enum(['identity', 'team2v2']).optional()
+      .describe('identity(默认)身份局:主公/忠臣/反贼/内奸,身份要靠推理。' +
+        'team2v2 组队对抗:固定 4 人两队,队伍公开、没有主公、没有击杀奖励;' +
+        '座次是"甲乙乙甲",0、3 号位一队,1、2 号位一队'),
     players: z.number().int().min(2).max(8).optional()
-      .describe('总人数 2~8,默认 2(1v1 单挑)'),
+      .describe('总人数 2~8,默认 2(1v1 单挑)。team2v2 固定 4 人,这个参数会被忽略'),
     seat: z.number().int().min(0).max(7).optional()
-      .describe('你坐第几号位,默认 0。0 号位固定是主公'),
+      .describe('你坐第几号位,默认 0。身份局里 0 号位固定是主公;team2v2 里 0 号位是先手方'),
     seed: z.number().int().optional().describe('随机种子,同一种子牌局完全一致,便于复盘'),
     codec: z.enum(['verbose', 'anon']).optional()
       .describe('verbose 用武将/卡牌原名;anon 全部代号化,用于排除你对原版规则的先验'),
@@ -65,12 +69,16 @@ server.registerTool('new_game', {
 }, async (args) => {
   try {
     session = new GameSession({
+      mode: args.mode,
       players: args.players,
       seat: args.seat,
       seed: args.seed,
       codec: args.codec,
       generals: args.generals,
       handicap: args.handicap,
+      // 漏了这一行的时候,humanSeat 在 schema 里写着、说明里讲着,实际那个座位
+      // 还是规则 AI,真人 npm run join 上来会发现根本没有位子等他
+      humanSeat: args.humanSeat,
     });
   } catch (e) {
     return text(e instanceof Error ? e.message : String(e));

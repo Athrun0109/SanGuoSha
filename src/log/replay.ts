@@ -20,7 +20,9 @@ import '../content/cards.js';
 import '../content/generals.js';
 import { createGame } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { SUITS, type Card, type Suit } from '../core/types.js';
@@ -148,15 +150,21 @@ export class ReplayAgent implements Agent {
     return d.choice.length ? d.choice[0] : -1;
   }
 
-  async chooseCards(game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string) {
+  async chooseCards(
+    game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string,
+    opts?: ChooseCardsOpts,
+  ) {
     const d = this.script.next('cards', this.seat, cards.length);
-    if (!d) return this.fb.chooseCards(game, self, cards, min, max, prompt);
+    if (!d) return this.fb.chooseCards(game, self, cards, min, max, prompt, opts);
     return d.choice.map(i => cards[i]);
   }
 
-  async choosePlayers(game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string) {
+  async choosePlayers(
+    game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string,
+    opts?: ChoosePlayersOpts,
+  ) {
     const d = this.script.next('players', this.seat, cands.length);
-    if (!d) return this.fb.choosePlayers(game, self, cands, min, max, prompt);
+    if (!d) return this.fb.choosePlayers(game, self, cands, min, max, prompt, opts);
     return d.choice.map(i => cands[i]);
   }
 
@@ -209,6 +217,8 @@ export async function replay(file: string, opts: { log?: (m: string) => void } =
   const newLines: string[] = [];
 
   const game = createGame({
+    // 模式决定身份怎么分、谁先手 —— 不带上的话 2v2 的记录会按身份局重放,第一步就对不上
+    mode: typeof m.mode === 'string' ? m.mode : undefined,
     playerCount: m.playerCount ?? log.setup?.players?.length ?? 2,
     seed: m.seed,
     fixedGenerals: m.fixedGenerals ?? undefined,

@@ -60,8 +60,36 @@ export const REASONING_BUDGET: Record<string, number> = {
   low: 2400, medium: 6000, high: 12000, xhigh: 12000, max: 12000,
 };
 
-/** 见下面 timeoutMs 那段注释:它和 maxTokens 是必须一起动的一对 */
+/** 没有 reasoning 预算可依据时的兜底上限,同时也是任何一档的封顶值 */
 export const DEFAULT_TIMEOUT_MS = 180_000;
+
+/**
+ * 实测过的**最低**持续吞吐,用来把 token 预算折成秒。
+ * 同一局里量到 5.9~95.8 tok/s(小回复被建连开销主导,所以低端那几个不算数);
+ * 大回复上量到的最慢是 55~60 tok/s,取 50 留一点余量。
+ */
+const FLOOR_TOK_PER_SEC = 50;
+/** 建连、排队、首 token 之前的固定开销 */
+const TIMEOUT_OVERHEAD_MS = 25_000;
+
+/**
+ * 按这次请求的推理预算算出该等多久。
+ *
+ * 以前是一律 180 秒 —— 那个数是照着 `maxTokens: 32768` **敞开生成**标定的。
+ * 可是 effort=low 已经把推理封在 2400 token 上,再慢的供应商也就几十秒,
+ * 等满 180 秒只意味着一件事:**这个节点根本没在吐字**。
+ *
+ * 而超时之后是**换一家重试**(共 3 次),不是直接兜底。实测同一个问题、同一个模型、
+ * 同一档 effort,分到 AtlasCloud 是 1.8~7.4 秒,分到 SiliconFlow 是 5.6~44.5 秒,
+ * 分到 Wafer 是 92 秒 —— 差 16 倍。既然重掷一次这么便宜,就没理由干等。
+ *
+ * 封顶仍然是 180 秒:high 档真能吐 12000 个推理 token,那种情况该等就得等。
+ */
+export function timeoutForBudget(budget?: number): number {
+  if (!budget) return DEFAULT_TIMEOUT_MS;
+  return Math.min(DEFAULT_TIMEOUT_MS,
+    TIMEOUT_OVERHEAD_MS + Math.ceil(budget / FLOOR_TOK_PER_SEC) * 1000);
+}
 
 /**
  * 供应商路由:**按吞吐排序,优先连得快的节点**。
@@ -96,7 +124,8 @@ export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient 
    * 真正的解法是流式:那样就能改成"多久没吐出新 token 才算断",
    * 把"模型在认真想"和"连接已经死了"区分开。现在这条路只能二选一。
    */
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // 显式传了就照传的来;没传就每次请求按 effort 的预算现算(见 timeoutForBudget)
+  const fixedTimeout = opts.timeoutMs;
   const provider = opts.provider === null ? null : (opts.provider ?? DEFAULT_PROVIDER);
   const budgets = opts.reasoningBudget === null ? null : (opts.reasoningBudget ?? REASONING_BUDGET);
 
@@ -104,6 +133,8 @@ export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient 
     messages: {
       async create(params: any) {
         const body = toOpenAI({ ...params, provider, reasoningBudget: budgets });
+        const budget = budgets?.[params.output_config?.effort];
+        const timeoutMs = fixedTimeout ?? timeoutForBudget(budget);
         const ctl = new AbortController();
         // 超时必须一直罩到**读完响应体**为止。
         // 只罩 fetch() 是不够的 —— 它在收到响应头时就 resolve 了,
@@ -132,7 +163,10 @@ export function createOpenRouterClient(opts: OpenRouterOptions = {}): LLMClient 
           raw = await res.text();
         } catch (e) {
           if (e instanceof Error && (e.name === 'AbortError' || ctl.signal.aborted)) {
-            throw new Error(`请求超时(${Math.round(timeoutMs / 1000)}s 没读完响应)`);
+            // 把预算一并写进去 —— 光看"超时 180s"分不清是模型在想还是节点卡住了,
+            // 而 2400 token 的预算配上几十秒不返回,只可能是后者
+            throw new Error(`请求超时(${Math.round(timeoutMs / 1000)}s 没读完响应` +
+              (budget ? `,推理预算 ${budget} tokens —— 多半是分到了卡住的节点` : '') + ')');
           }
           throw e;
         } finally {

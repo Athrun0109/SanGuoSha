@@ -22,15 +22,17 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { cardLabel, ROLE_NAME, SUITS, type Card } from '../core/types.js';
 import type { DecisionInfo } from '../ai/llmAgent.js';
 
-/** 决策的种类,对应 Agent 上的 7 个方法 */
-export type AskKind =
-  | 'playAction' | 'response' | 'cards' | 'players' | 'option' | 'arrange' | 'suit';
+/** 决策的种类。定义在 core/agent.ts —— 引擎和计划执行器也要用,这里只是转出 */
+import type { AskKind } from '../core/agent.js';
+export type { AskKind };
 
 export interface RecorderOptions {
   /** 输出目录,默认 <cwd>/logs */
@@ -264,17 +266,23 @@ class RecordingAgent implements Agent {
     return n;
   }
 
-  async chooseCards(game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string) {
+  async chooseCards(
+    game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string,
+    opts?: ChooseCardsOpts,
+  ) {
     this.rec.ask('cards', self.seat, this.id, prompt, cards.map(cardLabel), min, max);
-    const picked = await this.inner.chooseCards(game, self, cards, min, max, prompt);
+    const picked = await this.inner.chooseCards(game, self, cards, min, max, prompt, opts);
     const idx = picked.map(c => cards.indexOf(c));
     this.rec.answer(idx, picked.map(cardLabel));
     return picked;
   }
 
-  async choosePlayers(game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string) {
+  async choosePlayers(
+    game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string,
+    opts?: ChoosePlayersOpts,
+  ) {
     this.rec.ask('players', self.seat, this.id, prompt, cands.map(p => p.name), min, max);
-    const picked = await this.inner.choosePlayers(game, self, cands, min, max, prompt);
+    const picked = await this.inner.choosePlayers(game, self, cands, min, max, prompt, opts);
     const idx = picked.map(p => cands.indexOf(p));
     this.rec.answer(idx, picked.map(p => p.name));
     return picked;

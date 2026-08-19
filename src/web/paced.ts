@@ -7,7 +7,9 @@
  * 之所以只能停在这里:引擎的 log() 是同步的,没法在里面 await。
  */
 
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import type { Card, Suit } from '../core/types.js';
@@ -36,11 +38,15 @@ class PacedAgent implements Agent {
   async chooseResponse(g: Game, s: Player, o: CardOption[], p: string, f: boolean, c?: ResponseCtx) {
     await this.tick(); return this.inner.chooseResponse(g, s, o, p, f, c);
   }
-  async chooseCards(g: Game, s: Player, cs: Card[], min: number, max: number, p: string) {
-    await this.tick(); return this.inner.chooseCards(g, s, cs, min, max, p);
+  async chooseCards(
+    g: Game, s: Player, cs: Card[], min: number, max: number, p: string, o?: ChooseCardsOpts,
+  ) {
+    await this.tick(); return this.inner.chooseCards(g, s, cs, min, max, p, o);
   }
-  async choosePlayers(g: Game, s: Player, cs: Player[], min: number, max: number, p: string) {
-    await this.tick(); return this.inner.choosePlayers(g, s, cs, min, max, p);
+  async choosePlayers(
+    g: Game, s: Player, cs: Player[], min: number, max: number, p: string, o?: ChoosePlayersOpts,
+  ) {
+    await this.tick(); return this.inner.choosePlayers(g, s, cs, min, max, p, o);
   }
   async chooseOption(g: Game, s: Player, o: string[], p: string, cancelable?: boolean, c?: OptionCtx) {
     await this.tick(); return this.inner.chooseOption(g, s, o, p, cancelable, c);

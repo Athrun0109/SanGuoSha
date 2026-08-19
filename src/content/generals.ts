@@ -276,19 +276,31 @@ defineGeneral({
   name: '刘备', kingdom: 'shu', gender: 'male', hp: 4,
   skills: [
     active({
-      name: '仁德', desc: '出牌阶段,你可以将任意张手牌交给其他角色',
+      name: '仁德', desc: '出牌阶段,你可以将任意张手牌交给其他角色;以此法给出两张后回复1点体力(每回合限一次)',
       canUse: (g, self) => self.hand.length > 0 && g.others(self).length > 0,
       async onUse(game, self) {
         const cards = await game.agentOf(self).chooseCards(
           game, self, [...self.hand], 1, self.hand.length, '仁德:选择要交给他人的手牌',
+          { cancelable: true },
         );
-        if (!cards.length) return;
+        if (!cards.length) return false;
         const chosen = await game.agentOf(self).choosePlayers(
           game, self, game.others(self), 1, 1, '仁德:交给哪名角色?',
         );
-        if (!chosen.length) return;
+        if (!chosen.length) return false;
         await game.gainCards(chosen[0], cards, '仁德');
         game.log(`  ${self.name} 将 ${cards.length} 张牌交给 ${chosen[0].name}`);
+        /*
+         * 给满两张回 1 血,每回合限一次。
+         *
+         * 张数是**本回合累计**的,不是单次 —— 分两次各给一张同样算数,
+         * 这也是仁德真正的用法(一张一张喂,凑够两张顺带回血)。
+         */
+        self.addMark('turn:仁德给出', cards.length);
+        if (self.mark('turn:仁德给出') >= 2 && !self.mark('turn:仁德回血')) {
+          self.setMark('turn:仁德回血', 1);
+          await game.recover(self, 1, self, '仁德');
+        }
       },
     }),
     triggered({
@@ -317,6 +329,8 @@ defineGeneral({
   skills: [
     viewAs({
       name: '武圣', desc: '你可以将一张红色牌当【杀】使用或打出',
+      // 「牌」不限于手牌 —— 装备区里的也算(官方裁定,见 ViewAsSkill.zone)
+      zone: 'all',
       produces: ['杀'],
       cardCount: 1,
       cardFilter: (g, self, card) => isRed(card),
@@ -449,9 +463,9 @@ defineGeneral({
       async onUse(game, self) {
         const pool = [...self.hand, ...self.equipCards];
         const cards = await game.agentOf(self).chooseCards(
-          game, self, pool, 1, pool.length, '制衡:弃置任意张牌',
+          game, self, pool, 1, pool.length, '制衡:弃置任意张牌', { cancelable: true },
         );
-        if (!cards.length) return;
+        if (!cards.length) return false;
         await game.discardCards(cards, '制衡');
         await game.drawCards(self, cards.length, '制衡');
       },
@@ -479,6 +493,8 @@ defineGeneral({
   skills: [
     viewAs({
       name: '奇袭', desc: '你可以将一张黑色牌当【过河拆桥】使用',
+      // 「牌」不限于手牌 —— 装备区里的也算(官方裁定,见 ViewAsSkill.zone)
+      zone: 'all',
       produces: ['过河拆桥'],
       cardCount: 1,
       cardFilter: (g, self, card) => isBlack(card),
@@ -557,6 +573,8 @@ defineGeneral({
   skills: [
     viewAs({
       name: '国色', desc: '你可以将一张♦牌当【乐不思蜀】使用',
+      // 「牌」不限于手牌 —— 装备区里的也算(官方裁定,见 ViewAsSkill.zone)
+      zone: 'all',
       produces: ['乐不思蜀'],
       cardCount: 1,
       cardFilter: (g, self, card) => card.suit === '♦',
@@ -624,11 +642,11 @@ defineGeneral({
         && g.others(self).some(p => p.gender === 'male' && p.isWounded),
       async onUse(game, self) {
         const cands = game.others(self).filter(p => p.gender === 'male' && p.isWounded);
-        if (!cands.length) return;
-        const d = await game.askForDiscard(self, 2, '结姻:弃置两张手牌');
-        if (d.length < 2) return;
+        if (!cands.length) return false;
+        const d = await game.askForDiscard(self, 2, '结姻:弃置两张手牌', { cancelable: true });
+        if (d.length < 2) return false;
         const chosen = await game.agentOf(self).choosePlayers(game, self, cands, 1, 1, '结姻:选择一名已受伤的男性角色');
-        if (!chosen[0]) return;
+        if (!chosen[0]) return false;
         await game.recover(chosen[0], 1, self, '结姻');
         await game.recover(self, 1, self, '结姻');
       },
@@ -660,9 +678,9 @@ defineGeneral({
       canUse: (g, self) => self.hand.length > 0 && g.alivePlayers.some(p => p.isWounded),
       async onUse(game, self) {
         const cands = game.alivePlayers.filter(p => p.isWounded);
-        if (!cands.length) return;
-        const d = await game.askForDiscard(self, 1, '青囊:弃置一张手牌');
-        if (!d.length) return;
+        if (!cands.length) return false;
+        const d = await game.askForDiscard(self, 1, '青囊:弃置一张手牌', { cancelable: true });
+        if (!d.length) return false;
         const chosen = await game.agentOf(self).choosePlayers(game, self, cands, 1, 1, '青囊:令谁回复1点体力?');
         if (chosen[0]) await game.recover(chosen[0], 1, self, '青囊');
       },
@@ -705,20 +723,36 @@ defineGeneral({
   name: '貂蝉', kingdom: 'qun', gender: 'female', hp: 3,
   skills: [
     active({
-      name: '离间', desc: '出牌阶段限一次,你可以弃置一张牌,令两名男性角色决斗',
+      name: '离间', desc: '出牌阶段限一次,你可以弃置一张牌,令两名男性角色决斗(先选的先出【杀】,不可被【无懈可击】)',
       limit: 'once-per-turn',
       canUse: (g, self) => self.allCards.length > 0
         && g.others(self).filter(p => p.gender === 'male').length >= 2,
       async onUse(game, self) {
         const males = game.others(self).filter(p => p.gender === 'male');
         if (males.length < 2) return;
-        const d = await game.askForDiscard(self, 1, '离间:弃置一张牌', { includeEquip: true });
-        if (!d.length) return;
-        const chosen = await game.agentOf(self).choosePlayers(game, self, males, 2, 2, '离间:选择两名男性角色(第一名视为使用【决斗】)');
-        if (chosen.length < 2) return;
+        // 弃牌这一步可以反悔:交空数组就等于点了"取消",本回合的机会不会被吃掉
+        const d = await game.askForDiscard(self, 1, '离间:弃置一张牌', {
+          includeEquip: true, cancelable: true,
+        });
+        if (!d.length) return false;
+        const chosen = await game.agentOf(self).choosePlayers(
+          game, self, males, 2, 2, '离间:选择两名男性角色(先选的那名先出【杀】)', { ordered: true });
+        if (chosen.length < 2) return false;
         const vc: VirtualCard = { name: '决斗', suit: 'none', rank: 0, cards: [], skill: '离间' };
-        game.log(`  ${self.name} 离间:${chosen[0].name} 对 ${chosen[1].name} 使用【决斗】`);
-        await game.useCard(game.makeUse(vc, chosen[0], [chosen[1]]));
+        /*
+         * **方向:后选的那名视为对先选的那名使用【决斗】。**
+         *
+         * 决斗是"目标先出杀,双方轮流",所以谁当目标谁就先出 —— 想让**先选的先出杀**,
+         * 就得让他当目标。选人的顺序因此是有意义的,不能被引擎替玩家定
+         * (那道题两个候选、要选两个,以前会被"只有一个合法解"直接跳过,
+         *  于是永远按座位号排,先手优势稳定送给座位靠前的那个人)。
+         */
+        game.log(`  ${self.name} 离间:${chosen[1].name} 对 ${chosen[0].name} 使用【决斗】` +
+          `(${chosen[0].name} 先出【杀】)`);
+        const use = game.makeUse(vc, chosen[1], [chosen[0]]);
+        // 离间本身不是锦囊牌,视为使用的这张决斗按基础版规则不可被【无懈可击】
+        use.nullifiable = false;
+        await game.useCard(use);
       },
     }),
     triggered({

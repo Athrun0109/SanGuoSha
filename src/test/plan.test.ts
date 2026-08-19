@@ -40,15 +40,15 @@ test('计划里的动作按顺序兑现,目标和区域也一并填上', () => {
 
   // 下一个出牌动作
   assert.deepEqual(
-    r.answer(game, me, PLAY, ['出 杀[♣10]', '出 过河拆桥[♣3]', '结束出牌阶段'], 1, 1), [1]);
+    r.answer(game, me, PLAY, ['出 杀[♣10]', '出 过河拆桥[♣3]', '结束出牌阶段'], 1, 1, 'playAction'), [1]);
   // 紧接着的目标问题
   assert.deepEqual(
-    r.answer(game, me, '过河拆桥:选择目标', ['P1(甄姬) hp3/3 手牌2', 'P2(甘宁) hp4/4 手牌3'], 1, 1), [0]);
+    r.answer(game, me, '过河拆桥:选择目标', ['P1(甄姬) hp3/3 手牌2', 'P2(甘宁) hp4/4 手牌3'], 1, 1, 'players'), [0]);
   // 再紧接着的区域问题
   assert.deepEqual(
-    r.answer(game, me, '过河拆桥:弃置一张牌', ['手牌(2张,随机一张)', '装备区 进攻马[♦K]'], 1, 1), [1]);
+    r.answer(game, me, '过河拆桥:弃置一张牌', ['手牌(2张,随机一张)', '装备区 进攻马[♦K]'], 1, 1, 'option'), [1]);
   // 然后是计划的最后一步
-  assert.deepEqual(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束出牌阶段'], 1, 1), [0]);
+  assert.deepEqual(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束出牌阶段'], 1, 1, 'playAction'), [0]);
   assert.equal(r.used, 4);
 });
 
@@ -59,7 +59,7 @@ test('摸到新牌就作废 —— 新牌会改变计划的前提', () => {
 
   give(game, me, '桃', '♥', 5);            // 模拟集智/连营/枭姬那类"打着打着就摸牌"
   let why = '';
-  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束出牌阶段'], 1, 1, w => { why = w; }), null);
+  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束出牌阶段'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '摸到新牌');
   assert.equal(r.pending, 0, '整份计划都要丢掉');
 });
@@ -71,7 +71,7 @@ test('对不上选项就整份作废,绝不猜一个"差不多"的', () => {
 
   let why = '';
   // 那张杀已经不在手上了(被拆了/被顺了)
-  assert.equal(r.answer(game, me, PLAY, ['出 桃[♥5]', '结束出牌阶段'], 1, 1, w => { why = w; }), null);
+  assert.equal(r.answer(game, me, PLAY, ['出 桃[♥5]', '结束出牌阶段'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '对不上选项');
   assert.equal(r.pending, 0);
 });
@@ -83,7 +83,7 @@ test('命中多个也算对不上 —— 宁可作废也不挑第一个', () => 
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀', target: 1, zone: '' }]);
   let why = '';
   assert.equal(
-    r.answer(game, me, PLAY, ['出 杀[♣10]', '出 杀[♠3]', '结束出牌阶段'], 1, 1, w => { why = w; }), null);
+    r.answer(game, me, PLAY, ['出 杀[♣10]', '出 杀[♠3]', '结束出牌阶段'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '对不上选项');
 });
 
@@ -93,7 +93,7 @@ test('换了回合就作废,不把上一回合的计划带过来', () => {
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
   game.turnCount += 1;
   let why = '';
-  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束出牌阶段'], 1, 1, w => { why = w; }), null);
+  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束出牌阶段'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '换了回合');
 });
 
@@ -108,7 +108,7 @@ test('冒出一道计划管不着的题 → 整份作废,不闭眼走完', () =>
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
   let why = '';
   assert.equal(
-    r.answer(game, me, '0号位·刘备 对你使用【杀】,请打出【闪】', ['闪[♦6]'], 0, 1, w => { why = w; }),
+    r.answer(game, me, '0号位·刘备 对你使用【杀】,请打出【闪】', ['闪[♦6]'], 0, 1, 'response', w => { why = w; }),
     null, '响应类决策必须回到模型手里');
   assert.equal(why, '出了计划外的状况');
   assert.equal(r.pending, 0, '剩余步骤也要丢掉 —— 前提已经变了');
@@ -127,8 +127,8 @@ test('区域按语义认,不要求照抄 —— 写计划时那些选项还不�
     const { game, me } = mk();
     const r = new PlanRunner();
     r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '过河拆桥[♣3]', target: 1, zone }]);
-    r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1);
-    assert.deepEqual(r.answer(game, me, '拆:弃置一张牌', zones, 1, 1), [want], `zone=${zone}`);
+    r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1, 'playAction');
+    assert.deepEqual(r.answer(game, me, '拆:弃置一张牌', zones, 1, 1, 'option'), [want], `zone=${zone}`);
   }
 });
 
@@ -138,8 +138,8 @@ test('同一区域有多张时靠牌名区分,认不出就交回模型', () => {
     const { game, me } = mk();
     const r = new PlanRunner();
     r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '过河拆桥[♣3]', target: 1, zone }]);
-    r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1);
-    return r.answer(game, me, '拆:弃置一张牌', zones, 1, 1);
+    r.answer(game, me, PLAY, ['出 过河拆桥[♣3]', '结束'], 1, 1, 'playAction');
+    return r.answer(game, me, '拆:弃置一张牌', zones, 1, 1, 'option');
   };
   assert.deepEqual(pick('装备区 防御马'), [1], '写了牌名就该认出来');
   assert.equal(pick('装备区'), null, '两匹马都在装备区,没写牌名就别猜');
@@ -152,7 +152,7 @@ test('计划里的牌被无懈抵消 → 后面的步骤要重新规划', () => 
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
   game.nullified++;
   let why = '';
-  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, w => { why = w; }), null);
+  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '牌被无懈可击抵消');
 });
 
@@ -162,7 +162,7 @@ test('中途掉血也要重新规划', () => {
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
   me.hp -= 1;                       // 决斗输了 / 闪电劈了
   let why = '';
-  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, w => { why = w; }), null);
+  assert.equal(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '中途掉血');
 });
 
@@ -244,7 +244,7 @@ test('标签完全相同的重复牌不算歧义 —— 取第一个就行', () 
   const r = new PlanRunner();
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♥J]', target: 1, zone: '' }]);
   assert.deepEqual(
-    r.answer(game, me, PLAY, ['出 杀[♥J]', '出 杀[♥J]', '结束出牌阶段'], 1, 1), [0]);
+    r.answer(game, me, PLAY, ['出 杀[♥J]', '出 杀[♥J]', '结束出牌阶段'], 1, 1, 'playAction'), [0]);
 });
 
 test('但标签不同的多重命中仍然算歧义', () => {
@@ -253,6 +253,138 @@ test('但标签不同的多重命中仍然算歧义', () => {
   r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀', target: 1, zone: '' }]);
   let why = '';
   assert.equal(
-    r.answer(game, me, PLAY, ['出 杀[♥J]', '出 杀[♠3]', '结束'], 1, 1, w => { why = w; }), null);
+    r.answer(game, me, PLAY, ['出 杀[♥J]', '出 杀[♠3]', '结束'], 1, 1, 'playAction', w => { why = w; }), null);
   assert.equal(why, '对不上选项');
+});
+
+test('动作自身的参数不算"计划外" —— 仁德交哪几张牌,问完继续走', () => {
+  /*
+   * 真实事故(20260819-180527,回合 4 和回合 8 各一次):模型计划「仁德 → …」,
+   * 选完仁德紧接着被问「仁德:选择要交给他人的手牌」,执行器判成计划外,整份扔掉。
+   *
+   * 可仁德只会让手牌**变少**,没有任何前提被推翻。当时执行器只认识"选目标"和
+   * "选区域"两种子问题,第三种(选牌)一出现就走 drop —— 于是**每次计划到仁德
+   * 都白写一份**。判据现在改成看题型:cards/players 是这个动作自己的参数,
+   * response/option 才是"局面突然要你表态"。
+   */
+  const { game, me } = mk();
+  const r = new PlanRunner();
+  r.adopt(game, me, [
+    { act: '(这次已经出掉的动作)', target: -1, zone: '' },   // adopt 会丢掉第一步
+    { act: '【仁德】', target: -1, zone: '' },
+    { act: '杀[♣10]', target: 1, zone: '' },
+  ]);
+  let why = '';
+  const drop = (w: string) => { why = w; };
+
+  // 计划走到仁德那一步
+  assert.deepEqual(
+    r.answer(game, me, PLAY, ['出 【仁德】', '出 杀[♣10]', '结束'], 1, 1, 'playAction', drop), [0]);
+
+  // 交哪几张牌 —— 计划里没写,交回模型问,但**剩下的步骤要留着**
+  assert.equal(
+    r.answer(game, me, '仁德:选择要交给他人的手牌', ['青釭剑[♠6]', '闪[♥K]'], 1, 2, 'cards', drop),
+    null, '选牌这道题计划答不上来,该问模型');
+  assert.equal(why, '', '但不该因此丢掉计划');
+  assert.equal(r.pending, 1, '后面那一步还在');
+
+  // 交给谁 —— 计划里也没写目标(target=-1),同样只是问一次
+  assert.equal(
+    r.answer(game, me, '仁德:交给哪名角色?', ['P1(甄姬) hp3/3', 'P2(甘宁) hp4/4'], 1, 1, 'players', drop),
+    null);
+  assert.equal(why, '');
+
+  // 回到出牌阶段,计划的最后一步照常兑现
+  assert.deepEqual(r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, 'playAction', drop), [0]);
+  assert.equal(r.pending, 0);
+});
+
+test('但"局面要你表态"仍然作废 —— 这条不能被上一条带松', () => {
+  // 刚烈让你选掉血还是弃牌(option)、有人打你要不要出闪(response):
+  // 这些是别人的动作砸过来的,计划的前提可能已经不成立
+  for (const [kind, q, opts] of [
+    ['response', '0号位·刘备 对你使用【杀】,请打出【闪】', ['闪[♦6]']],
+    ['option', '是否发动【刚烈】的弃牌?', ['掉一点体力', '弃两张牌']],
+  ] as const) {
+    const { game, me } = mk();
+    const r = new PlanRunner();
+    r.adopt(game, me, [{ act: 'A', target: -1, zone: '' }, { act: '杀[♣10]', target: 1, zone: '' }]);
+    let why = '';
+    assert.equal(r.answer(game, me, q, [...opts], 0, 1, kind, w => { why = w; }), null);
+    assert.equal(why, '出了计划外的状况', `${kind} 应该打断计划`);
+    assert.equal(r.pending, 0);
+  }
+});
+
+test('参数问题不作废,不等于"闭眼走完" —— 牌真没了照样对不上', () => {
+  /*
+   * 放宽之后唯一的风险:仁德把后面要用的那张牌交出去了。
+   * 兜底是 uniqueMatch —— 那张牌不在选项里,下一步照样判"对不上选项"。
+   */
+  const { game, me } = mk();
+  const r = new PlanRunner();
+  r.adopt(game, me, [
+    { act: '(这次已经出掉的动作)', target: -1, zone: '' },
+    { act: '【仁德】', target: -1, zone: '' },
+    { act: '杀[♣10]', target: 1, zone: '' },
+  ]);
+  let why = '';
+  const drop = (w: string) => { why = w; };
+  r.answer(game, me, PLAY, ['出 【仁德】', '出 杀[♣10]', '结束'], 1, 1, 'playAction', drop);
+  r.answer(game, me, '仁德:选择要交给他人的手牌', ['杀[♣10]'], 1, 1, 'cards', drop);
+  // 那张杀被交出去了,出牌阶段的选项里已经没有它
+  assert.equal(r.answer(game, me, PLAY, ['结束出牌阶段'], 1, 1, 'playAction', drop), null);
+  assert.equal(why, '对不上选项');
+});
+
+test('刚收下的计划不会被"自己这一步的目标"当场打掉', () => {
+  /*
+   * 真实事故(20260819-180527):那一局 10 次计划中断**全是**这一类,其中 8 次就是
+   * 「为 X 选择目标」。
+   *
+   * 链路是这样的:模型自己答了出牌阶段并附上计划 → adopt 把第一步 shift 掉 →
+   * `active` 是空的 → 引擎紧接着问这个动作的目标 → 落到"计划管不着的题"那一支 →
+   * **刚收下的计划当场作废**。只要模型出的牌需要指定目标(杀、拆、顺、乐…),
+   * 计划就必死,等于这个功能大半时间没在工作。
+   */
+  const { game, me } = mk();
+  const r = new PlanRunner();
+  let why = '';
+  r.adopt(game, me, [
+    { act: '过河拆桥[♣3]', target: 1, zone: '手牌' },   // 模型这次已经选掉的动作
+    { act: '杀[♣10]', target: 2, zone: '' },
+  ], '出 过河拆桥[♣3]', w => { why = w; });
+  assert.equal(why, '');
+  assert.equal(r.pending, 1);
+
+  // 自己这一步的目标,计划里写着,直接兑现 —— 以前这里会把整份计划扔掉
+  assert.deepEqual(
+    r.answer(game, me, '过河拆桥:选择目标',
+      ['P1(甄姬) hp3/3 手牌2', 'P2(甘宁) hp4/4 手牌3'], 1, 1, 'players', w => { why = w; }),
+    [0]);
+  assert.equal(why, '');
+  // 区域也一样
+  assert.deepEqual(
+    r.answer(game, me, '过河拆桥:弃置一张牌',
+      ['手牌(2张,随机一张)', '装备区 进攻马[♦K]'], 1, 1, 'option', w => { why = w; }), [0]);
+  // 然后才轮到计划的下一步
+  assert.deepEqual(
+    r.answer(game, me, PLAY, ['出 杀[♣10]', '结束'], 1, 1, 'playAction', w => { why = w; }), [0]);
+});
+
+test('第一步和实际选的动作对不上时,不拿它去答目标', () => {
+  // 核对不上说明模型的计划和它自己的选择不一致,这时宁可多问一次也不能猜错目标
+  const { game, me } = mk();
+  const r = new PlanRunner();
+  r.adopt(game, me, [
+    { act: '杀[♠3]', target: 1, zone: '' },            // 计划说出杀
+    { act: '桃[♥5]', target: -1, zone: '' },
+  ], '出 过河拆桥[♣3]');                                // 实际选的却是拆桥
+  // 对不上就按"它是从下一步写起的"处理,两步都留着 —— 而不是闷头丢掉一个真动作
+  assert.equal(r.pending, 2);
+  assert.equal(
+    r.answer(game, me, '过河拆桥:选择目标',
+      ['P1(甄姬) hp3/3 手牌2', 'P2(甘宁) hp4/4 手牌3'], 1, 1, 'players'),
+    null, '对不上就交回模型,别拿计划里那个目标去答');
+  assert.equal(r.pending, 2, '但也不该因此丢掉计划');
 });

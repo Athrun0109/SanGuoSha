@@ -72,6 +72,14 @@ export interface CardUseEvent extends BaseEvent {
   unavoidable?: Set<Player>;
   /** 本次使用需要的额外闪数量(无双) */
   extraDodge?: number;
+  /**
+   * 这一次使用能不能被【无懈可击】拦。默认能(锦囊);写 false 就跳过那个窗口。
+   *
+   * 和 `spec.nullifiable` 的区别:那个是**牌的属性**(这张牌永远不可无懈),
+   * 这个是**这一次使用的属性** —— 同样一张【决斗】,自己出的可以被无懈,
+   * 由【离间】视为使用的那张不行。
+   */
+  nullifiable?: boolean;
   /** 响应链上的附加数据,技能之间可自由约定 */
   tags: Record<string, any>;
 }

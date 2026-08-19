@@ -1,5 +1,8 @@
 /**
- * 批量自动对战:npm run sim [局数] [人数] [--verbose] [--handicap=N] [--roles=...]
+ * 批量自动对战:npm run sim [局数] [人数] [--verbose] [--handicap=N] [--roles=...] [--mode=...]
+ *
+ * --mode=team2v2 跑 2v2(人数固定 4)。这个模式下"按身份"那张表就是两队的胜率 ——
+ * 两边都是同一个规则 AI,所以它直接告诉你先手方(蓝队)占了多少便宜。
  *
  * --roles=,内奸 把内奸钉在 1 号位。想集中测某个身份的表现时用 ——
  * 靠随机开局,8 人局里内奸只有 1/8 的概率落到你想看的那个座位上。
@@ -13,6 +16,7 @@
 import '../content/cards.js';
 import '../content/generals.js';
 import { createGame, parseRoleSpec } from '../core/setup.js';
+import { getMode } from '../core/mode.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { ROLE_NAME, Role } from '../core/types.js';
 
@@ -20,13 +24,16 @@ interface Stat { games: number; wins: number; }
 
 async function main() {
   const games = Number(process.argv[2] ?? 100);
-  const n = Number(process.argv[3] ?? 5);
+  const mode = getMode(process.argv.find(a => a.startsWith('--mode='))?.slice(7));
+  const nArg = Number(process.argv[3] ?? 5);
+  // 模式支持的人数是硬约束,不合法就退到它的第一档,免得跑了 500 局才发现参数写错
+  const n = mode.sizes.includes(nArg) ? nArg : mode.sizes[0];
   const verbose = process.argv.includes('--verbose');
   const hcArg = process.argv.find(a => a.startsWith('--handicap='));
   const handicap = hcArg ? Number(hcArg.split('=')[1]) : undefined;
   let fixedRoles;
   try {
-    fixedRoles = parseRoleSpec(process.argv.find(a => a.startsWith('--roles='))?.slice(8), n);
+    fixedRoles = parseRoleSpec(process.argv.find(a => a.startsWith('--roles='))?.slice(8), n, mode);
   } catch (e) {
     console.error(e instanceof Error ? e.message : e);
     process.exit(1);
@@ -43,6 +50,7 @@ async function main() {
   for (let i = 0; i < games; i++) {
     try {
       const game = createGame({
+        mode,
         playerCount: n,
         seed: 1000 + i,
         fixedRoles,
@@ -69,10 +77,10 @@ async function main() {
   }
 
   const ok = games - errors;
-  console.log(`\n跑完 ${ok}/${games} 局(${n}人局),平均 ${(turns / Math.max(1, ok)).toFixed(1)} 回合,` +
+  console.log(`\n跑完 ${ok}/${games} 局(${n} 人 ${mode.label}),平均 ${(turns / Math.max(1, ok)).toFixed(1)} 回合,` +
     `耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s,异常 ${errors} 局`);
 
-  console.log('\n按身份:');
+  console.log(mode.hidden ? '\n按身份:' : '\n按队伍:');
   for (const [role, s] of [...byRole.entries()].sort()) {
     console.log(`  ${ROLE_NAME[role].padEnd(4)} 登场 ${String(s.games).padStart(4)}  胜率 ${(100 * s.wins / s.games).toFixed(1)}%`);
   }

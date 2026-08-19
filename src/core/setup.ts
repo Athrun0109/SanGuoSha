@@ -2,23 +2,21 @@ import { Game, GameOptions, RNG } from './game.js';
 import { Player } from './player.js';
 import { ROLE_NAME, type Role } from './types.js';
 import { generals } from './registry.js';
+import { getMode, identityMode, ROLE_TABLE, type GameMode } from './mode.js';
 import { buildDeck } from '../content/cards.js';
 import { LORD_GENERALS, STANDARD_GENERALS } from '../content/generals.js';
 import type { Agent } from './agent.js';
 
-/** 各人数下的身份配置 */
-export const ROLE_TABLE: Record<number, Role[]> = {
-  2: ['lord', 'rebel'],
-  3: ['lord', 'rebel', 'renegade'],
-  4: ['lord', 'loyalist', 'rebel', 'renegade'],
-  5: ['lord', 'loyalist', 'rebel', 'rebel', 'renegade'],
-  6: ['lord', 'loyalist', 'rebel', 'rebel', 'rebel', 'renegade'],
-  7: ['lord', 'loyalist', 'loyalist', 'rebel', 'rebel', 'rebel', 'renegade'],
-  8: ['lord', 'loyalist', 'loyalist', 'rebel', 'rebel', 'rebel', 'rebel', 'renegade'],
-};
+/** 各人数下的身份配置 —— 定义搬到了 core/mode.ts,这里转出保持老引用可用 */
+export { ROLE_TABLE };
 
-export interface SetupOptions extends GameOptions {
+export interface SetupOptions extends Omit<GameOptions, 'mode'> {
   playerCount?: number;
+  /**
+   * 对局模式。传 GameMode 对象或名字('identity' / 'team2v2'),默认身份局。
+   * 决定身份怎么分、有没有主公加血、谁先手、怎么算赢 —— 见 core/mode.ts
+   */
+  mode?: GameMode | string;
   /** 座位 -> agent 工厂 */
   makeAgent: (p: Player, index: number) => Agent;
   /** 手动点将:座位 -> 武将名,如 { 0: '刘备', 3: '吕布' }。没指定的座位随机 */
@@ -94,11 +92,17 @@ const ROLE_ALIAS: Record<string, Role> = {
   loyalist: 'loyalist', 忠: 'loyalist', 忠臣: 'loyalist',
   rebel: 'rebel', 反: 'rebel', 反贼: 'rebel',
   renegade: 'renegade', 内: 'renegade', 内奸: 'renegade',
+  // 2v2 的两支队伍
+  blue: 'blue', 蓝: 'blue', 蓝队: 'blue', 队1: 'blue', '1队': 'blue',
+  red: 'red', 红: 'red', 红队: 'red', 队2: 'red', '2队': 'red',
 };
 
-/** 解析身份串,如 "主公,内奸,,反贼" —— 空位表示随机。写法见 ROLE_ALIAS */
+/**
+ * 解析身份/队伍串,如 "主公,内奸,,反贼" —— 空位表示随机。写法见 ROLE_ALIAS。
+ * mode 决定这些名字在本局合不合法(2v2 里没有"主公")。
+ */
 export function parseRoleSpec(
-  spec: string | string[] | undefined, n: number,
+  spec: string | string[] | undefined, n: number, mode: GameMode = identityMode,
 ): Record<number, Role> | undefined {
   if (!spec) return undefined;
   const items = (Array.isArray(spec) ? spec : spec.split(',')).map(x => x.trim());
@@ -112,72 +116,48 @@ export function parseRoleSpec(
   }
   if (bad.length) {
     throw new Error(`不认识的身份:${bad.join('、')}
-可用:主公/忠臣/反贼/内奸,或 lord/loyalist/rebel/renegade`);
+可用:主公/忠臣/反贼/内奸,或 lord/loyalist/rebel/renegade;2v2 用 蓝队/红队`);
   }
   if (!Object.keys(out).length) return undefined;
   // 名额对不对在这里就查 —— 留到 createGame 里才炸的话,横幅都打出去了,
   // 而且那是个未捕获的堆栈,看着像 bug 而不是"你参数写错了"
-  checkRoles(out, n);
+  mode.check(out, n);
   return out;
 }
 
 /** 校验一份身份指定在 n 人局里是否成立。不合法就抛出带本局配置的错误 */
-export function checkRoles(fixed: Record<number, Role>, n: number): void {
-  const table = ROLE_TABLE[n];
-  if (!table) throw new Error(`不支持 ${n} 人局`);
-  const pool = [...table];
-  for (const [k, role] of Object.entries(fixed)) {
-    const seat = Number(k);
-    if (!Number.isInteger(seat) || seat < 0 || seat >= n) {
-      throw new Error(`没有 ${k} 号位(${n} 人局的座位是 0~${n - 1})`);
-    }
-    const at = pool.indexOf(role);
-    if (at < 0) {
-      throw new Error(
-        `${ROLE_NAME[role]} 指定多了 —— 本局只有 ${table.filter(r => r === role).length} 个。\n` +
-        `${n} 人局的身份配置:${table.map(r => ROLE_NAME[r]).join(' ')}`);
-    }
-    pool.splice(at, 1);
-  }
+export function checkRoles(
+  fixed: Record<number, Role>, n: number, mode: GameMode = identityMode,
+): void {
+  mode.check(fixed, n);
 }
 
 /**
- * 定下每个座位的身份。没有指定时保持原有行为(0 号位主公,其余打乱)。
+ * 定下每个座位的阵营。没有指定时保持原有行为(身份局 0 号位主公,其余打乱)。
  *
  * 指定过的座位占掉对应名额,剩下的名额洗牌后填进空座位 —— 所以**剩余部分仍然
  * 由 seed 决定**,同一个 seed + 同一份指定,开出来的局是一样的。
  */
-export function resolveRoles(n: number, rng: RNG, fixed?: Record<number, Role>): Role[] {
-  const table = ROLE_TABLE[n];
-  if (!table) throw new Error(`不支持 ${n} 人局`);
-  if (!fixed || !Object.keys(fixed).length) {
-    return ['lord', ...rng.shuffle(table.slice(1))];
-  }
-
+export function resolveRoles(
+  n: number, rng: RNG, fixed?: Record<number, Role>, mode: GameMode = identityMode,
+): Role[] {
   // 命令行那条路已经在 parseRoleSpec 里查过了;这里再查一遍是为了挡住
   // 直接构造对象传进来的调用方(界面、脚本、测试)
-  checkRoles(fixed, n);
-
-  const pool = [...table];
-  const out: Array<Role | undefined> = new Array(n).fill(undefined);
-  for (const [k, role] of Object.entries(fixed)) {
-    pool.splice(pool.indexOf(role), 1);
-    out[Number(k)] = role;
-  }
-
-  const rest = rng.shuffle(pool);
-  for (let i = 0; i < n; i++) out[i] ??= rest.shift();
-  return out as Role[];
+  if (fixed && Object.keys(fixed).length) mode.check(fixed, n);
+  return mode.assign(n, rng, fixed);
 }
 
 export function createGame(opts: SetupOptions): Game {
   const n = opts.playerCount ?? 8;
-  if (!ROLE_TABLE[n]) throw new Error(`不支持 ${n} 人局`);
+  const mode = typeof opts.mode === 'string' ? getMode(opts.mode) : opts.mode ?? identityMode;
+  if (!mode.sizes.includes(n)) {
+    throw new Error(`${mode.label}不支持 ${n} 人(可选 ${mode.sizes.join('/')} 人)`);
+  }
 
-  const game = new Game(opts);
+  const game = new Game({ ...opts, mode });
   const rng = game.rng;
 
-  const finalRoles = resolveRoles(n, rng, opts.fixedRoles);
+  const finalRoles = resolveRoles(n, rng, opts.fixedRoles, mode);
 
   // 武将
   const pool = rng.shuffle([...STANDARD_GENERALS]);
@@ -190,6 +170,7 @@ export function createGame(opts: SetupOptions): Game {
     let gname = opts.fixedGenerals?.[i]?.trim();
     if (!gname) {
       if (p.role === 'lord') {
+        // 主公从主公武将池里挑(2v2 没有主公,走不到这一支)
         const lordPool = rng.shuffle([...LORD_GENERALS]);
         gname = lordPool.find(g => !usedNames.has(g))!;
       } else {
@@ -207,10 +188,10 @@ export function createGame(opts: SetupOptions): Game {
     p.kingdom = def.kingdom;
     p.gender = def.gender;
     p.skills = [...def.skills];
-    p.maxHp = def.hp + (p.role === 'lord' && (opts.lordBonusHp ?? true) && n > 2 ? 1 : 0);
+    p.maxHp = def.hp + ((opts.lordBonusHp ?? true) ? mode.bonusHp(p.role, n) : 0);
     p.hp = p.maxHp;
     p.name = `${i}号位·${def.name}`;
-    if (p.role === 'lord') p.revealed = true;
+    if (mode.revealed(p.role)) p.revealed = true;
 
     game.players.push(p);
     game.agents.set(p, opts.makeAgent(p, i));
@@ -218,8 +199,8 @@ export function createGame(opts: SetupOptions): Game {
 
   // 牌堆
   game.deck = rng.shuffle(buildDeck());
-  // 主公先手。允许把主公放在别的座位(fixedRoles),所以这里不能写死 players[0]
-  game.current = game.players.find(p => p.role === 'lord') ?? game.players[0];
+  // 先手由模式决定:身份局跟着主公走(主公可以不坐 0 号位),2v2 就是 0 号位
+  game.current = mode.first(game.players);
 
   // 起始手牌(1v1 的后手补牌就在这里生效)
   const defaultHand = n === 2 ? [4, 4 + DUEL_HANDICAP] : undefined;

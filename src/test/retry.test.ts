@@ -3,7 +3,7 @@
  * 之前的实现是"任何接口错误立刻放弃",一次网络抖动就白白丢一个决策。
  */
 
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import '../content/cards.js';
@@ -11,7 +11,10 @@ import '../content/generals.js';
 import { createGame } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { LLMAgent, type DecisionInfo, type LLMClient } from '../ai/llmAgent.js';
-import { createOpenRouterClient, DEFAULT_TIMEOUT_MS, DEFAULT_PROVIDER } from '../ai/openrouterClient.js';
+import {
+  createOpenRouterClient, DEFAULT_TIMEOUT_MS, DEFAULT_PROVIDER,
+  REASONING_BUDGET, timeoutForBudget,
+} from '../ai/openrouterClient.js';
 
 const okJson = (choice: number[] = [0]) => ({
   content: [{ type: 'text', text: JSON.stringify({ thinking: 'ok', choice }) }],
@@ -198,12 +201,69 @@ test('默认 max_tokens 给得宽 —— 它是上限不是预留,给小了只�
   assert.ok(r.seen[0].max_tokens <= 65536, 'deepseek-v4-flash-0731 的输出上限是 65536');
 });
 
-test('超时和 max_tokens 是一对 —— 预算能吐多久,超时就得容多久', async () => {
-  // 非流式请求:模型没生成完一个字节都不会到,所以生成耗时全额计入超时。
-  // 把 maxTokens 从 8192 提到 32768 之后还留着 60s,撞的正是"模型这次话特别多"
-  // 那种情况 —— 也就是最该等一等的情况。两个旋钮必须一起动。
+test('超时跟着 reasoning 预算走,不是一律 180 秒', async () => {
+  /*
+   * 非流式请求:模型没生成完一个字节都不会到,所以生成耗时全额计入超时 ——
+   * 没有预算可依据时,超时必须配得上 32768 的 max_tokens。
+   */
   assert.ok(DEFAULT_TIMEOUT_MS >= 120_000,
     `默认超时只有 ${DEFAULT_TIMEOUT_MS / 1000}s,配不上 32768 的 max_tokens`);
+  assert.equal(timeoutForBudget(undefined), DEFAULT_TIMEOUT_MS);
+
+  /*
+   * 但一旦 effort 把推理封了顶,180 秒就纯属干等。
+   *
+   * 真实事故(20260819-180527):effort=low(推理封在 2400 token),一次"出牌阶段
+   * 选一个动作"、才 4 个选项,第一次调用整整等满 180 秒什么都没回来,换一家重试
+   * 又花了 92 秒 —— 一个决策 272 秒。而同一个问题分到快的节点只要 1.8 秒。
+   * 超时之后是**换一家重试**,不是直接兜底,所以早点重掷几乎没有代价。
+   */
+  const low = timeoutForBudget(REASONING_BUDGET.low);
+  assert.ok(low > 50_000, `low 档 ${low / 1000}s 太紧 —— 实测合法的 low 调用慢的能到 44.5s`);
+  assert.ok(low < 100_000, `low 档 ${low / 1000}s 还是太松,2400 token 不该等这么久`);
+  // 预算越大容得越久,且永远不超过兜底上限
+  assert.ok(timeoutForBudget(REASONING_BUDGET.medium) > low);
+  assert.equal(timeoutForBudget(REASONING_BUDGET.high), DEFAULT_TIMEOUT_MS);
+});
+
+test('低 effort 的请求真的按短超时放弃,而不是等满 180 秒', async () => {
+  const orig = globalThis.fetch;
+  let aborted = false;
+  globalThis.fetch = (async (_u: any, init: any) => {
+    // 头发完、body 永远不给 —— 正是那次事故的形态
+    const stalled = new ReadableStream({
+      start(c) {
+        init.signal?.addEventListener('abort', () => {
+          aborted = true;
+          c.error(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      },
+    });
+    return new Response(stalled, { status: 200 });
+  }) as any;
+  // 派生出来的超时是几十秒,真等一遍太慢 —— 用假定时器把它跳过去
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  try {
+    const client = createOpenRouterClient({ apiKey: 'sk-test' });
+    const call = client.messages.create({
+      model: 'm', messages: [], output_config: { effort: 'low' },
+    });
+    // 走到 low 档的超时点之后,再往前一点点 —— 不该等到 180 秒
+    mock.timers.tick(timeoutForBudget(REASONING_BUDGET.low) + 1000);
+    await assert.rejects(
+      () => call,
+      (e: Error) => {
+        assert.match(e.message, /请求超时/);
+        assert.match(e.message, new RegExp(`推理预算 ${REASONING_BUDGET.low} tokens`),
+          '报错要说清预算,否则分不清是模型在想还是节点卡住了');
+        assert.ok(!/180s/.test(e.message), `low 档不该再报 180s,实际:${e.message}`);
+        return true;
+      });
+    assert.ok(aborted);
+  } finally {
+    mock.timers.reset();
+    globalThis.fetch = orig;
+  }
 });
 
 test('预算超出模型上限时往回退,不跟着翻倍再撞一次', async () => {

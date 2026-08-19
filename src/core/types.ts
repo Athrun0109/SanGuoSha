@@ -19,9 +19,18 @@ export const KINGDOM_NAME: Record<Kingdom, string> = {
 export type Gender = 'male' | 'female';
 
 /** 身份:主公 / 忠臣 / 反贼 / 内奸 */
-export type Role = 'lord' | 'loyalist' | 'rebel' | 'renegade';
+/**
+ * 座位的阵营。
+ *
+ * 前四个是身份局的身份;`blue`/`red` 是 2v2 的两支队伍 —— 复用同一个字段而不是
+ * 另开一个 team,是因为引擎里所有"你和他是不是一伙"的判断都走这里,分成两套
+ * 反而要处处考虑"现在该看哪个"。**具体怎么分阵营、怎么算胜负由 GameMode 决定**
+ * (见 core/mode.ts),这个类型只负责枚举可能的值。
+ */
+export type Role = 'lord' | 'loyalist' | 'rebel' | 'renegade' | 'blue' | 'red';
 export const ROLE_NAME: Record<Role, string> = {
   lord: '主公', loyalist: '忠臣', rebel: '反贼', renegade: '内奸',
+  blue: '蓝队', red: '红队',
 };
 
 export type CardType = 'basic' | 'trick' | 'equip';

@@ -26,6 +26,7 @@
  * 上面全部情况,以后 DIY 加新技能也不用维护清单。
  */
 
+import type { AskKind } from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 
@@ -42,6 +43,20 @@ export interface PlanStep {
 export type DropReason =
   | '摸到新牌' | '换了回合' | '对不上选项' | '模型给的计划为空'
   | '牌被无懈可击抵消' | '中途掉血' | '出了计划外的状况';
+
+/**
+ * 这道题是**我这个动作自己的参数**,还是**局面突然要我表态**?
+ *
+ * 只有后者才说明计划的前提塌了。前者是计划内那一步的细节 ——
+ * 仁德交哪几张牌、离间弃哪张、观星怎么排 —— 问一次模型就好,剩下的步骤照走。
+ *
+ * 真实事故:模型计划「仁德 → …」,选完仁德紧接着被问"交给他人的手牌"(kind=cards),
+ * 而执行器只认识"选目标"和"选区域"两种子问题,于是判成计划外、把整份计划扔了。
+ * 仁德只会让手牌变少,没有任何前提被推翻 —— **每次计划到仁德都白写一份**。
+ */
+const IS_PARAMETER: Partial<Record<AskKind, true>> = {
+  cards: true, players: true, arrange: true, suit: true,
+};
 
 export const PLAN_SCHEMA = {
   type: 'array',
@@ -142,8 +157,23 @@ export class PlanRunner {
 
   get pending(): number { return this.steps.length; }
 
-  /** 收下模型给的新计划。第一步已经由 choice 执行了,所以这里只存后续步骤 */
-  adopt(game: Game, self: Player, steps: unknown, onDrop?: (why: string) => void): void {
+  /**
+   * 收下模型给的新计划。
+   *
+   * 第一步是模型这次**已经选掉**的动作,不能再执行一遍 —— 但它里面写着目标和区域,
+   * 而引擎紧接着就要问「为 X 选择目标」。所以不是丢掉它,而是把它挂成 `active`
+   * 去答那几道子问题,省一次调用。
+   *
+   * 真实事故(20260819-180527):那一局 10 次计划中断全是这一类,其中 8 次就是
+   * 「为 X 选择目标」—— 以前第一步被 shift 掉、`active` 是空的,子问题一来就被
+   * 判成"计划外",**刚收下的计划当场作废**。
+   *
+   * `chose` 是模型这次实际选中的选项文本,用来核对第一步确实是这个动作。
+   */
+  adopt(
+    game: Game, self: Player, steps: unknown,
+    chose?: string, onDrop?: (why: string) => void,
+  ): void {
     this.steps = [];
     this.active = null;
     if (!Array.isArray(steps) || !steps.length) return;
@@ -158,11 +188,24 @@ export class PlanRunner {
         zone: typeof (s as any).zone === 'string' ? (s as any).zone.trim() : '',
       });
     }
-    // 模型给的第一步就是它这次选的动作,已经执行过了,别再重复一次
-    ok.shift();
-    if (!ok.length) { onDrop?.('模型给的计划为空'); return; }
+    /*
+     * **只有核对上了才丢掉第一步。**
+     *
+     * "接下来几步"是句有歧义的话:模型可能从**这一步**写起,也可能从**下一步**写起。
+     * 以前无条件 shift,赌的是前者 —— 赌错了就会静默地跳过一个它真打算做的动作,
+     * 而那正是设计原则二禁止的"做了模型没打算做的事"。
+     *
+     * 现在拿它实际选中的选项核对:对得上说明第一步就是这个动作,丢掉、并挂成
+     * `active` 去答它的目标/区域;**对不上就整份留着**,按"它是从下一步写起的"处理。
+     * 万一其实是模型把当前动作写岔了,那张牌已经出掉了,下一步 `uniqueMatch`
+     * 找不到它,按"对不上选项"作废 —— 两种误判都只会白写一份计划,不会做错事。
+     */
+    if (ok.length && (!chose || uniqueMatch([chose], ok[0].act) === 0)) {
+      this.active = ok.shift()!;
+    }
     this.steps = ok;
     this.snapshot(game, self);
+    if (!ok.length && !this.active) onDrop?.('模型给的计划为空');
   }
 
   private snapshot(game: Game, self: Player) {
@@ -185,7 +228,7 @@ export class PlanRunner {
    */
   answer(
     game: Game, self: Player, question: string, options: string[], min: number, max: number,
-    onDrop?: (why: string) => void,
+    kind: AskKind, onDrop?: (why: string) => void,
   ): number[] | null {
     if (!this.steps.length && !this.active) return null;
 
@@ -197,9 +240,9 @@ export class PlanRunner {
      *  1. 摸到新牌     —— 新牌改变前提(集智/连营/枭姬/无中生有…)
      *  2. 牌被无懈抵消 —— "拆掉仁王盾再用黑杀",拆桥被无懈之后那张杀的价值就变了
      *  3. 中途掉血     —— 决斗输了、闪电劈了,后面的进攻计划得重算
-     *  4. 出了计划外的状况 —— 见下面 fallthrough:任何一次"计划答不上来、
-     *     必须问模型"的场合(刚烈让你选掉血还是弃牌、要不要反无懈…),
-     *     都说明局面偏离了计划,剩下的步骤不能闭着眼睛走完
+     *  4. 出了计划外的状况 —— **局面突然要你表态**(刚烈让你选掉血还是弃牌、
+     *     要不要反无懈、有人打你要不要出闪)。这类是 response/option,
+     *     判据见 IS_PARAMETER;动作自身的参数问题不算,那只是这一步的细节。
      */
     if (game.turnCount !== this.turn) { this.drop('换了回合', onDrop); return null; }
     if (self.hand.some(c => !this.hand.has(c.id))) { this.drop('摸到新牌', onDrop); return null; }
@@ -218,12 +261,22 @@ export class PlanRunner {
         const i = matchZone(options, this.active.zone);
         if (i >= 0 && min <= 1 && max >= 1) { this.used++; return [i]; }
       }
+      /*
+       * 答不上来,但这是**我自己这个动作的参数**(仁德交哪几张牌之类)——
+       * 交回模型问这一步的细节,剩下的步骤留着。真出了问题下一步会被
+       * `uniqueMatch` 判成"对不上选项",那道闸门才是兜底的。
+       */
+      if (IS_PARAMETER[kind]) return null;
       this.drop('出了计划外的状况', onDrop);
       return null;
     }
 
-    // 计划还在,却冒出一道它管不着的题(反无懈、刚烈二选一…) —— 局面偏离了,重新规划
-    if (!isPlayAction(question)) { this.drop('出了计划外的状况', onDrop); return null; }
+    // 计划还在,却冒出一道要你表态的题(反无懈、刚烈二选一…) —— 局面偏离了,重新规划
+    if (!isPlayAction(question)) {
+      if (IS_PARAMETER[kind]) return null;
+      this.drop('出了计划外的状况', onDrop);
+      return null;
+    }
 
     // —— 主问题:下一个出牌动作 ——
     if (min !== 1 || max !== 1) { this.drop('出了计划外的状况', onDrop); return null; }

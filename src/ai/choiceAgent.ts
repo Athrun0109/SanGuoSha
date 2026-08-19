@@ -7,7 +7,9 @@
  * 子类只需要实现 decide():返回选中的编号数组,或返回 null 表示"这次交给兜底 AI"。
  */
 
-import type { Agent, CardOption, OptionCtx, PlayAction, ResponseCtx } from '../core/agent.js';
+import type {
+  Agent, AskKind, CardOption, ChooseCardsOpts, ChoosePlayersOpts, OptionCtx, PlayAction, ResponseCtx,
+} from '../core/agent.js';
 import type { Game } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { Card, SUITS, Suit } from '../core/types.js';
@@ -23,6 +25,8 @@ export abstract class ChoiceAgent implements Agent {
   /** 返回 null = 本次交给兜底 AI */
   protected abstract decide(
     game: Game, self: Player, question: string, options: string[], min: number, max: number,
+    /** 这道题属于哪一类。多数子类用不上,计划执行器靠它分辨"动作参数"和"突发表态" */
+    kind: AskKind,
   ): Promise<number[] | null>;
 
   protected codec: Codec | null = null;
@@ -38,9 +42,11 @@ export abstract class ChoiceAgent implements Agent {
    */
   protected async ask(
     game: Game, self: Player, question: string, options: string[], min: number, max: number,
+    kind: AskKind, ordered = false,
   ): Promise<number[] | null> {
-    if (options.length === min && min === max) return options.map((_, i) => i);
-    return this.decide(game, self, question, options, min, max);
+    // 顺序有意义时不能走这条捷径:组合唯一不等于排列唯一(见 ChoosePlayersOpts.ordered)
+    if (!ordered && options.length === min && min === max) return options.map((_, i) => i);
+    return this.decide(game, self, question, options, min, max, kind);
   }
 
   async choosePlayAction(game: Game, self: Player, actions: PlayAction[]): Promise<number> {
@@ -49,7 +55,7 @@ export abstract class ChoiceAgent implements Agent {
       a.kind === 'card' ? `出 ${c.text(a.label)}`
         : a.kind === 'skill' ? `技能 ${c.skill(a.skill.name)}`
           : '结束出牌阶段');
-    const r = await this.ask(game, self, '出牌阶段,选一个动作', opts, 1, 1);
+    const r = await this.ask(game, self, '出牌阶段,选一个动作', opts, 1, 1, 'playAction');
     if (r === null) return this.fallback.choosePlayAction(game, self, actions);
     return r[0] ?? actions.length - 1;
   }
@@ -66,27 +72,32 @@ export abstract class ChoiceAgent implements Agent {
     if (ctx.use) q += `(来源 ${c.player(ctx.use.from)} 的 ${c.cardName(ctx.use.card.name)})`;
     if (ctx.dying) q += `(濒死者 ${c.player(ctx.dying)} hp${ctx.dying.hp})`;
     if (ctx.negated) q += '(该效果目前已被抵消,你再出会让它重新生效)';
-    const r = await this.ask(game, self, q, options.map(o => c.text(o.label)), forced ? 1 : 0, 1);
+    const r = await this.ask(game, self, q, options.map(o => c.text(o.label)), forced ? 1 : 0, 1, 'response');
     if (r === null) return this.fallback.chooseResponse(game, self, options, prompt, forced, ctx);
     return r.length ? r[0] : -1;
   }
 
   async chooseCards(
     game: Game, self: Player, cards: Card[], min: number, max: number, prompt: string,
+    opts: ChooseCardsOpts = {},
   ): Promise<Card[]> {
     const c = this.c(game);
-    const r = await this.ask(game, self, prompt, cards.map(x => c.card(x)), min, max);
-    if (r === null) return this.fallback.chooseCards(game, self, cards, min, max, prompt);
+    // 可反悔时把下限放到 0:交空数组 = 取消。规则 AI 走不到这里,不受影响
+    const lo = opts.cancelable ? 0 : min;
+    const r = await this.ask(game, self, prompt, cards.map(x => c.card(x)), lo, max, 'cards');
+    if (r === null) return this.fallback.chooseCards(game, self, cards, min, max, prompt, opts);
     return r.map(i => cards[i]);
   }
 
   async choosePlayers(
     game: Game, self: Player, cands: Player[], min: number, max: number, prompt: string,
+    opts: ChoosePlayersOpts = {},
   ): Promise<Player[]> {
     const c = this.c(game);
-    const opts = cands.map(p => `${c.player(p, self)} hp${p.hp}/${p.maxHp} 手牌${p.handCount}`);
-    const r = await this.ask(game, self, prompt, opts, min, max);
-    if (r === null) return this.fallback.choosePlayers(game, self, cands, min, max, prompt);
+    const labels = cands.map(p => `${c.player(p, self)} hp${p.hp}/${p.maxHp} 手牌${p.handCount}`);
+    const q = opts.ordered && max > 1 ? `${prompt}(**按顺序选**,先点的排在前面)` : prompt;
+    const r = await this.ask(game, self, q, labels, min, max, 'players', opts.ordered);
+    if (r === null) return this.fallback.choosePlayers(game, self, cands, min, max, prompt, opts);
     return r.map(i => cands[i]);
   }
 
@@ -100,13 +111,13 @@ export abstract class ChoiceAgent implements Agent {
       const sk = self.allSkills.find(s => s.name === ctx.skill);
       if (sk?.desc) q += `(${c.skill(sk.name)}:${c.text(sk.desc)})`;
     }
-    const r = await this.ask(game, self, q, options.map(o => c.text(o)), cancelable ? 0 : 1, 1);
+    const r = await this.ask(game, self, q, options.map(o => c.text(o)), cancelable ? 0 : 1, 1, 'option');
     if (r === null) return this.fallback.chooseOption(game, self, options, prompt, cancelable, ctx);
     return r.length ? r[0] : (cancelable ? -1 : 0);
   }
 
   async chooseSuit(game: Game, self: Player, prompt: string): Promise<Suit> {
-    const r = await this.ask(game, self, prompt, [...SUITS], 1, 1);
+    const r = await this.ask(game, self, prompt, [...SUITS], 1, 1, 'suit');
     if (r === null) return this.fallback.chooseSuit(game, self, prompt);
     return SUITS[r[0] ?? 0];
   }
@@ -116,7 +127,7 @@ export abstract class ChoiceAgent implements Agent {
   ): Promise<{ top: Card[]; bottom: Card[] }> {
     const c = this.c(game);
     const q = `${prompt}。选中的按你给的顺序放牌堆顶(排前面的先摸到),没选的沉底`;
-    const r = await this.ask(game, self, q, cards.map(x => c.card(x)), 0, cards.length);
+    const r = await this.ask(game, self, q, cards.map(x => c.card(x)), 0, cards.length, 'arrange');
     if (r === null) return this.fallback.arrangeCards(game, self, cards, prompt);
     const top = r.map(i => cards[i]);
     return { top, bottom: cards.filter(x => !top.includes(x)) };

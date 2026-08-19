@@ -109,6 +109,10 @@
   <div>
     <div class="card">
       <h3>对局</h3>
+      <div class="row"><label>模式</label>
+        <select id="mode"></select></div>
+      <div class="row" id="mode-hint-row"><label>&nbsp;</label>
+        <span class="hint" id="mode-hint"></span></div>
       <div class="row"><label>人数</label>
         <select id="n"></select></div>
       <div class="row"><label>随机种子</label>
@@ -168,7 +172,9 @@ const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.cl
 const KD = { wei: '魏', shu: '蜀', wu: '吴', qun: '群' };
 const CONTROLS = [['human', '你'], ['llm', '大模型'], ['rule', '规则AI']];
 
-let GENERALS = [], ROLES = {}, MODELS = [];
+let GENERALS = [], MODELS = [];
+let GAMEMODES = [];           // 服务端给的模式清单(含各人数下的身份表)
+let ROLES = {};               // 当前模式的 人数 -> 身份清单
 let seats = [];               // 每个席位的配置
 let pickingSeat = -1;         // 武将弹层当前在给谁选
 
@@ -310,6 +316,7 @@ function collect() {
   const n = seats.length;
   const v = $('#viewer').value;
   return {
+    mode: $('#mode').value,
     playerCount: n,
     seed: Number($('#seed').value) || 0,
     handicap: n === 2 ? Number($('#handicap').value) : null,
@@ -340,6 +347,7 @@ function validate() {
   $('#err').textContent = msg;
   $('#go').disabled = !!msg;
   $('#handicap-row').style.display = n === 2 ? '' : 'none';
+  $('#mode-hint-row').style.display = GAMEMODES.length > 1 ? '' : 'none';
   return !msg;
 }
 
@@ -412,9 +420,24 @@ $('#preflight').onclick = async () => {
 $('#dice').onclick = () => { $('#seed').value = Math.floor(Math.random() * 1e9); };
 $('#n').onchange = () => resize(Number($('#n').value));
 
+/** 切换对局模式:人数选项、身份清单、提示语都跟着换 */
+function applyMode() {
+  const m = GAMEMODES.find(x => x.id === $('#mode').value) || GAMEMODES[0];
+  ROLES = m.roles;
+  const nSel = $('#n');
+  const want = Number(nSel.value) || 3;   // 首次进来下拉还是空的,默认 3 人局
+  nSel.textContent = '';
+  for (const k of m.sizes) nSel.append(new Option(`${k} 人局`, String(k)));
+  // 换模式后原来的人数可能不在可选范围里(2v2 只有 4 人),就退回该模式的第一个
+  nSel.value = String(m.sizes.includes(want) ? want : m.sizes[0]);
+  $('#mode-hint').textContent = m.id === 'team2v2'
+    ? '两队各 2 人,队伍公开、没有主公。座次是"甲乙乙甲",所以出牌顺序天然是 队1→队2→队2→队1'
+    : '主公明示,其余身份要靠推理。主公 +1 体力上限(1v1 除外)';
+  resize(Number(nSel.value));
+}
+$('#mode').onchange = applyMode;
+
 (async function init() {
-  for (let i = 2; i <= 8; i++) $('#n').append(new Option(`${i} 人局`, String(i)));
-  $('#n').value = '3';
   $('#seed').value = Math.floor(Math.random() * 1e9);
   $('#speed').value = '500';
   $('#handicap').value = '1';
@@ -424,9 +447,11 @@ $('#n').onchange = () => resize(Number($('#n').value));
     fetch('/api/models').then(r => r.json()).catch(() => ({ recommended: [] })),
     fetch('/api/key').then(r => r.json()),
   ]);
-  GENERALS = g.generals; ROLES = g.roles;
+  GENERALS = g.generals;
+  GAMEMODES = g.modes || [];
+  for (const x of GAMEMODES) $('#mode').append(new Option(x.label, x.id));
   MODELS = m.recommended || [];
-  resize(3);
+  applyMode();
   showKey(k);
 })();
 </script>

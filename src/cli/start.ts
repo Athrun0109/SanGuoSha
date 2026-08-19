@@ -8,6 +8,7 @@
 import '../content/cards.js';
 import '../content/generals.js';
 import { createGame, parseGeneralSpec, DUEL_HANDICAP } from '../core/setup.js';
+import { identityMode, team2v2Mode } from '../core/mode.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { LLMAgent, type DecisionInfo } from '../ai/llmAgent.js';
 import { HumanAgent, closeCli, askLine, askSecret } from './humanAgent.js';
@@ -141,9 +142,17 @@ async function main() {
     if (!llm) console.log('→ 降级为规则 AI。');
   }
 
-  const players = mode === 1 || mode === 2 || mode === 3
-    ? 2                                            // 涉及大模型的都按 1v1 来,省钱也好观察
-    : await askNumber('几人局?', 5, 2, 8);
+  // 对局模式:身份局还是 2v2。2v2 固定 4 人、没有主公、队伍公开
+  const rules = await menu('对局模式?', [
+    '身份局(主公/忠臣/反贼/内奸,身份要靠猜)',
+    '2v2 组队对抗(4 人,两队各 2 人,队伍公开、没有主公)',
+  ], 0) === 1 ? team2v2Mode : identityMode;
+
+  const players = rules.name === 'team2v2'
+    ? 4
+    : mode === 1 || mode === 2 || mode === 3
+      ? 2                                          // 涉及大模型的都按 1v1 来,省钱也好观察
+      : await askNumber('几人局?', 5, 2, 8);
   const seat = iPlay ? await askNumber('你坐几号位?', 0, 0, players - 1) : -1;
 
   let fixedGenerals: Record<number, string> | undefined;
@@ -194,6 +203,7 @@ async function main() {
   };
 
   const game = createGame({
+    mode: rules,
     playerCount: players,
     seed,
     fixedGenerals,
@@ -212,20 +222,25 @@ async function main() {
   if (rec) {
     rec.bind(game);
     rec.start({
-      seed, playerCount: players, seat, mode,
+      seed, mode: rules.name, playerCount: players, seat, uiMode: mode,
       model: llm?.model ?? null, effort: llm ? effort : null,
       fixedGenerals: fixedGenerals ?? null,
     });
   }
 
   console.log('\n' + '═'.repeat(60));
-  console.log(`${players} 人局  seed=${seed}` +
+  console.log(`${players} 人 ${rules.label}  seed=${seed}` +
     (llm ? `  模型=${llm.model} effort=${effort}` : '  纯规则 AI') +
     (players === 2 ? `  后手补牌+${DUEL_HANDICAP}` : ''));
   for (const p of game.players) {
     const tag = p.seat === seat ? '(你)' : '';
+    // 你自己的身份、以及规则规定公开的身份(主公 / 2v2 的队伍)才打出来
+    const show = p.seat === seat || rules.revealed(p.role);
     console.log(`  [${p.seat}] ${p.general.name}${tag} ${p.maxHp}血 起手${p.handCount}张` +
-      (p.seat === seat || p.role === 'lord' ? ` 身份:${ROLE_NAME[p.role]}` : ''));
+      (show ? ` 身份:${ROLE_NAME[p.role]}` : ''));
+  }
+  if (rules.name === 'team2v2') {
+    console.log(`  出牌顺序 ${game.players.map(p => `${p.seat}号(${ROLE_NAME[p.role]})`).join(' -> ')} -> 回到 0 号`);
   }
   console.log('═'.repeat(60));
   if (rec) console.log(`\x1b[90m记录中 → ${rec.file}\x1b[0m`);

@@ -21,7 +21,7 @@ import { fetchModels, pickRecommended } from '../ai/modelList.js';
 import { preflight } from '../ai/preflight.js';
 import { saveEnv, ENV_FILE } from '../cli/env.js';
 import { generals } from '../core/registry.js';
-import { ROLE_TABLE } from '../core/setup.js';
+import { MODES } from '../core/mode.js';
 import { ROLE_NAME } from '../core/types.js';
 
 /** 掩码。短到藏不住的就整条打星,别露出前 6 位 */
@@ -107,9 +107,12 @@ export function setupApi(deps: SetupDeps) {
     // ——— 武将清单:直接从注册表读,不用维护第二份 ———
     if (url === '/api/generals' && req.method === 'GET') {
       sendJson(res, 200, {
-        roles: Object.fromEntries(
-          Object.entries(ROLE_TABLE).map(([n, rs]) => [n, rs.map(r => ({ id: r, name: ROLE_NAME[r] }))]),
-        ),
+        // 每个模式各给一份"n 人局有哪些身份",页面按当前模式取用
+        modes: Object.values(MODES).map(m => ({
+          id: m.name, label: m.label, sizes: m.sizes,
+          roles: Object.fromEntries(m.sizes.map(n =>
+            [n, m.table(n).map(r => ({ id: r, name: ROLE_NAME[r] }))])),
+        })),
         generals: [...generals.values()].map(g => ({
           name: g.name, kingdom: g.kingdom, gender: g.gender, hp: g.hp,
           skills: g.skills.filter(s => s.desc).map(s => ({ name: s.name, desc: s.desc })),
