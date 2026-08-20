@@ -37,14 +37,31 @@ test('快照不泄露其他座位的手牌', () => {
   assert.equal(st.seats[2].hand, null);
   assert.equal(st.seats[1].handCount, game.players[1].hand.length, '但张数是公开的');
 
-  // 别人手上那几张牌,连"牌名+花色+点数"这个组合都不该出现在 payload 里 ——
-  // 光看字段名不够,得看实际内容,不然哪天多序列化一个字段就漏了
+  /*
+   * 别人手上那几张牌的"牌名+花色"不该出现在 payload 里 —— 光看字段名不够,
+   * 得看实际内容,不然哪天多序列化一个字段就漏了。
+   *
+   * 但**不能简单地断言"这个组合不出现"**:官方牌堆相当于两副扑克,每个花色点数
+   * 正好两张,所以视角自己手上完全可能有一张一模一样的【杀♣9】。改牌表之后这条
+   * 立刻误报了一次。正确的判据是**出现次数**:某个组合在快照里出现几次,
+   * 就应该等于视角合法看得到的同组合牌有几张,多一次才是泄露。
+   */
   const json = JSON.stringify(st);
+  const visible = [
+    ...game.players[0].hand,
+    ...game.players.flatMap(p => p.equipCards),
+  ];
+  const fragmentOf = (c: { name: string; suit: string }) =>
+    JSON.stringify({ name: c.name, suit: c.suit }).slice(1, -1);
+  const occurrences = (frag: string) => json.split(frag).length - 1;
+
   for (const p of game.players.slice(1)) {
     for (const c of p.hand) {
-      const fragment = JSON.stringify({ name: c.name, suit: c.suit }).slice(1, -1);
-      assert.ok(!json.includes(fragment),
-        `${p.seat}号的手牌 ${cardLabel(c)} 泄露到了快照里`);
+      const frag = fragmentOf(c);
+      const allowed = visible.filter(v => fragmentOf(v) === frag).length;
+      assert.ok(occurrences(frag) <= allowed,
+        `${p.seat}号的手牌 ${cardLabel(c)} 泄露到了快照里` +
+        `(出现 ${occurrences(frag)} 次,视角只该看到 ${allowed} 次)`);
     }
   }
 });

@@ -39,6 +39,25 @@ function start(seed = 2026) {
 
 const settle = () => new Promise(r => setTimeout(r, 0));
 
+/**
+ * 把这次结算跑完:提交完自己关心的那一步之后,后面还可能冒出别的题
+ * (五谷对其他目标结算时会问你要不要【无懈可击】—— 只要你手上真有一张)。
+ * 不答就永远停在那里,整个测试文件跟着挂死。
+ *
+ * 这条是改牌表之后炸出来的:0 号位的起手牌变了、多了一张无懈,
+ * 而测试只提交了一次答案。以前能过纯属那副牌里恰好没有无懈。
+ */
+async function finish(web: WebAgent, pr: Promise<unknown>) {
+  let done = false;
+  void pr.then(() => { done = true; }, () => { done = true; });
+  for (let i = 0; i < 50 && !done; i++) {
+    await settle();
+    const p = web.pending;
+    if (p) web.submit(Array.from({ length: p.min }, (_, j) => j));   // 能放弃就放弃
+  }
+  await pr;
+}
+
 /** 开一局,0 号位是网页座位,引擎不自动跑 —— 由测试自己驱动到想要的那一步 */
 async function stage(generals: Record<number, string>) {
   let web!: WebAgent;
@@ -214,7 +233,7 @@ test('五谷的候选是"牌",不是一排文字按钮', async () => {
   assert.ok(p.items.every(it => it.kind === 'card' && !it.ids.some(id => mine.has(id))),
     '五谷的候选来自牌堆,不该和自己手牌重合 —— 重合了就会被误判成"在手牌里点"');
   web.submit([0]);
-  await pr;
+  await finish(web, pr);
 });
 
 test('弃牌选的是自己的手牌 —— 那些在手牌行里点,不进中央牌堆', async () => {
@@ -232,5 +251,5 @@ test('弃牌选的是自己的手牌 —— 那些在手牌行里点,不进中�
     '弃牌的候选全是自己的手牌');
   // 弃牌是 min=max=N,少交一个会被校验挡回、promise 永远不兑现(这里挂过一次)
   assert.equal(web.submit(Array.from({ length: p.min }, (_, i) => i)), null);
-  await pr;
+  await finish(web, pr);
 });

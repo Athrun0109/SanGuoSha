@@ -13,10 +13,44 @@ import { DECK_TABLE } from '../content/cards.js';
 test('牌堆:每张牌都有对应的行为定义', () => {
   const deck = buildDeck();
   assert.equal(deck.length, DECK_TABLE.length);
-  assert.equal(deck.length, 106, '当前配比为 106 张;改了 DECK_TABLE 记得同步这里');
+  assert.equal(deck.length, 104, '标准版是 104 张;改了 DECK_TABLE 记得同步这里');
   for (const c of deck) assert.ok(cardSpecs.has(c.name), `未定义的牌:${c.name}`);
   const ids = new Set(deck.map(c => c.id));
   assert.equal(ids.size, deck.length, '牌的 id 必须唯一');
+});
+
+test('牌堆配比和官方标准版逐格一致', () => {
+  /*
+   * 官方标准版牌堆相当于**两副扑克**:四种花色各 26 张,每个花色点数正好两张。
+   * 这条不变量能挡住绝大多数手滑 —— 而牌堆错了是最阴的一类 bug:
+   * 判定看花色点数(闪电判♠2~9、乐不思蜀判♥、八卦阵判红)、转化技看花色
+   * (武圣要红、倾国要黑、国色要♦)、记牌器的整个概率模型也建立在配比上,
+   * 但**跑一整局什么都不会报错**,只是结果不对。
+   *
+   * 真实事故:原表 106 张,混进了两张军争篇的牌(仁王盾♣2、第二张闪电♥Q)、
+   * 无懈可击用了 EX 版的♦Q,另有 7 张牌花色点数放错位置。
+   */
+  const bySuit = new Map<string, number>();
+  const byCell = new Map<string, number>();
+  for (const [, suit, rank] of DECK_TABLE) {
+    bySuit.set(suit, (bySuit.get(suit) ?? 0) + 1);
+    const cell = `${suit}${rank}`;
+    byCell.set(cell, (byCell.get(cell) ?? 0) + 1);
+  }
+  for (const suit of ['♠', '♥', '♣', '♦']) {
+    assert.equal(bySuit.get(suit), 26, `${suit} 应该有 26 张`);
+  }
+  assert.equal(byCell.size, 52, '应该覆盖全部 52 个花色点数');
+  for (const [cell, n] of byCell) assert.equal(n, 2, `${cell} 有 ${n} 张,应该是 2 张`);
+
+  const count = (name: string) => DECK_TABLE.filter(([n]) => n === name).length;
+  assert.equal(count('杀'), 30);
+  assert.equal(count('闪'), 15);
+  assert.equal(count('桃'), 8);
+  // 军争篇的牌不能混进标准版牌堆(实现还留着,开扩展包时再加回去)
+  assert.equal(count('仁王盾'), 0, '仁王盾是军争篇的牌');
+  assert.equal(count('闪电'), 1, '标准版只有一张闪电(♠A);第二张♥Q是军争篇的');
+  assert.equal(count('八卦阵'), 2);
 });
 
 test('武将:标准包 25 将全部注册且都有技能', () => {

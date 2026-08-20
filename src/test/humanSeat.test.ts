@@ -126,11 +126,27 @@ test('两边各自只看到自己的手牌', async () => {
     for (const c of claude.hand) {
       assert.ok(claudeHand.includes(cardLabel(c)), `Claude 视图缺少自己的牌 ${cardLabel(c)}`);
     }
-    for (const c of claude.hand.filter(x => !me.hand.some(y => y.id === x.id))) {
-      assert.ok(!humanHand.includes(cardLabel(c)), `真人视图泄漏了对手的牌 ${cardLabel(c)}`);
+    /*
+     * 判泄漏要**数次数**,不能只问"这个标签在不在"。
+     *
+     * 官方牌堆相当于两副扑克,每个花色点数正好两张 —— 【杀♣J】双方各摸到一张
+     * 完全正常。按 id 排除、却按标签查,就会把这种情况误报成泄漏(改牌表之后
+     * 立刻炸了一次)。正确的判据:某个标签在视图里出现几次,应该等于**这个视角
+     * 自己手上**有几张同标签的牌。
+     */
+    const times = (view: string, label: string) => view.split(label).length - 1;
+    const mine = (hand: typeof me.hand, label: string) =>
+      hand.filter(c => cardLabel(c) === label).length;
+
+    for (const c of claude.hand) {
+      const label = cardLabel(c);
+      assert.ok(times(humanHand, label) <= mine(me.hand, label),
+        `真人视图泄漏了对手的牌 ${label}`);
     }
-    for (const c of me.hand.filter(x => !claude.hand.some(y => y.id === x.id))) {
-      assert.ok(!claudeHand.includes(cardLabel(c)), `Claude 视图泄漏了真人的牌 ${cardLabel(c)}`);
+    for (const c of me.hand) {
+      const label = cardLabel(c);
+      assert.ok(times(claudeHand, label) <= mine(claude.hand, label),
+        `Claude 视图泄漏了真人的牌 ${label}`);
     }
     assert.notEqual(humanHand, claudeHand);
   } finally {
