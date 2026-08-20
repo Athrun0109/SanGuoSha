@@ -106,20 +106,28 @@ export interface ViewAsSkill extends SkillBase {
  *
  * 目前引擎支持的查询名(owner 表示该查询读谁的技能):
  *   数值类(所有贡献相加):
- *     'attackRange'    owner=自己         攻击范围加成
- *     'distanceDelta'  owner=起点         计算距离时的修正(马术 = -1)
- *     'maxHand'        owner=自己         手牌上限加成
- *     'slashLimit'     owner=使用者       出牌阶段杀的次数加成(Infinity 表示无限)
- *     'extraDodge'     owner=杀的使用者   目标需要多打出几张闪(无双 = +1)
- *     'extraSlash'     owner=决斗发起者   对方每次需多打出几张杀(无双 = +1)
- *     'peachRecover'   owner=被救者       一张桃回复的体力(默认 1)
+ *     'attackRange'      owner=自己       攻击范围加成(武器)
+ *     'distanceDelta'    owner=起点       你算与别人的距离 -N(马术、进攻马)
+ *     'distanceFromDelta'owner=终点       别人算与你的距离 +N(防御马)
+ *     'slashExtraTargets'owner=使用者     这张杀可以多指定几个目标(方天画戟)
+ *                                         ctx.card 是这张杀,别只看手牌数
+ *     'extraDodge'       owner=杀的使用者 目标需要多打出几张闪(无双 = +1)
+ *     'extraSlash'       owner=决斗发起者 对方每次需多打出几张杀(无双 = +1)
+ *     'maxHand'          owner=自己       手牌上限加成 —— **目前没有技能产出**
+ *     'slashLimit'       owner=使用者     杀的次数加成 —— **目前没有技能产出**
+ *     'peachRecover'     owner=被救者     一张桃回复的体力 —— **目前没有技能产出**
+ *                                         (孙权【救援】是自己再 recover 一次,没走这里)
  *   布尔类(任一为 true 即成立):
  *     'prohibitTarget' owner=目标         该角色不能成为这张牌的目标(空城/谦逊)
  *     'ignoreDistance' owner=使用者       使用该牌无距离限制(奇才)
  *     'ignoreArmor'    owner=使用者       无视目标防具(青釭剑)
  *     'invalidToTarget'owner=目标         该牌对自己无效(仁王盾)
- *     'skipDiscard'    owner=自己         跳过弃牌阶段(克己)
  *     'noSlashLimit'   owner=使用者       杀无次数限制(咆哮/诸葛连弩)
+ *     'skipDiscard'    owner=自己         跳过弃牌阶段 —— **目前没有技能产出**
+ *                                         (吕蒙【克己】走的是 triggered,不是这里)
+ *
+ * 注:标了"目前没有技能产出"的四个只有调用点、没有生产者。别拿这份清单当
+ * "引擎支持什么"的依据 —— 它只说明**挂钩在哪**,真要用先确认调用点还在。
  *
  * 想加新规则杠杆:在这里加一个查询名,然后在 game.ts 相应位置调用一次即可。
  */

@@ -572,9 +572,16 @@ export class Game {
   async askForDiscard(
     p: Player, n: number,
     prompt: string,
-    opts: { includeEquip?: boolean; min?: number; cancelable?: boolean } = {},
+    opts: {
+      includeEquip?: boolean;
+      min?: number;
+      cancelable?: boolean;
+      /** 这几张不能选(【贯石斧】发动时不能把贯石斧本身弃掉) */
+      exclude?: Card[];
+    } = {},
   ): Promise<Card[]> {
-    const pool = opts.includeEquip ? [...p.hand, ...p.equipCards] : [...p.hand];
+    let pool = opts.includeEquip ? [...p.hand, ...p.equipCards] : [...p.hand];
+    if (opts.exclude?.length) pool = pool.filter(c => !opts.exclude!.includes(c));
     const min = opts.min ?? n;
     if (pool.length < min) return [];
     // cancelable 交给 agent 自己判断要不要放弃 —— 不能靠把 min 调成 0 来表达,

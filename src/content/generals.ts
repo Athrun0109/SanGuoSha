@@ -83,7 +83,9 @@ defineGeneral({
       },
       async effect({ game, self, event }) {
         const e = event as DamageEvent;
-        const c = await pickCardFrom(game, self, e.from!, `反馈:获得 ${e.from!.name} 的一张牌`);
+        // FAQ:「判定区的牌不属于伤害来源的牌」—— 反馈只能拿手牌和装备
+        const c = await pickCardFrom(game, self, e.from!, `反馈:获得 ${e.from!.name} 的一张牌`,
+          { judgeZone: false });
         if (c) await game.gainCards(self, [c], '反馈');
       },
     }),
@@ -504,18 +506,50 @@ defineGeneral({
   ],
 });
 
+/**
+ * 【克己】的屯牌上限 —— **房规,不是官方规则**。
+ *
+ * 官方【克己】是"跳过弃牌阶段",手牌可以无限涨。实测(规则 AI 互打 3000 局 8 人局):
+ * 全场手牌峰值中位 8、p90 11,**但最大出现过 66 张**,而那 66 张就是吕蒙。
+ *
+ * 屯到那个量级有三个问题:
+ *   界面   自己的手牌一行约放 12 张,40 张就开始挤压战报区,100 张直接压垮布局
+ *   token  104 张手牌时 L2 局面 1149 字、出牌阶段 **77 个选项**、题面 981 字,
+ *          比正常手牌每次决策多烧约 1500 字 —— 而且是每一次决策都多
+ *   体验   那种局面对其他人基本就是垃圾时间
+ *
+ * 所以把【克己】从"跳过弃牌阶段"改成"**本回合手牌上限视为 32**":
+ * 32 张以内和原来完全一样(p90 才 11,九成对局根本碰不到这条),
+ * 超过了才开始弃 —— 只在真的失控时才咬。
+ *
+ * 强度上不需要为此削他:3000 局登场胜率 44.4%,和华佗 45.6%、张飞 43.4% 并列
+ * 第一梯队,在噪声范围内,不是超模。
+ */
+export const KEJI_HAND_CAP = 32;
+
 defineGeneral({
   name: '吕蒙', kingdom: 'wu', gender: 'male', hp: 4,
   skills: [
     triggered({
-      name: '克己', desc: '若你未于出牌阶段内使用或打出过【杀】,你可以跳过弃牌阶段',
+      name: '克己',
+      desc: `若你未于出牌阶段内使用或打出过【杀】,你可以令本回合手牌上限视为 ${KEJI_HAND_CAP}(房规上限)`,
       timing: 'PhaseStart',
-      filter: ({ self, event }) => {
+      filter: ({ game, self, event }) => {
         const e = event as PhaseEvent;
+        // 上限用 game.maxHand 而不是 self.hp —— 以后有技能改手牌上限时才不会错
         return e.player === self && e.phase === 'discard' && self.mark('turn:playedSlash') === 0
-          && self.handCount > self.hp;
+          && self.handCount > game.maxHand(self);
       },
-      effect({ event }) { (event as PhaseEvent).skipped = true; },
+      effect({ self }) { self.setMark('turn:克己', 1); },
+    }),
+    staticSkill({
+      name: '克己·上限',
+      // 发动了克己的回合,手牌上限抬到 KEJI_HAND_CAP。走的是引擎现成的 maxHand 杠杆,
+      // 弃牌阶段自然会按新的上限来弃(超过 32 张才弃,弃到 32 为止)
+      queries: {
+        maxHand: (g, self) =>
+          (self.mark('turn:克己') ? Math.max(0, KEJI_HAND_CAP - self.hp) : 0),
+      },
     }),
   ],
 });
@@ -555,7 +589,12 @@ defineGeneral({
         const target = chosen[0];
         if (!target) return;
         const suit = await game.agentOf(target).chooseSuit(game, target, '反间:请选择一种花色');
-        const card = randomHandCard(game, self);
+        // FAQ:「如果有多张手牌,牌的放置顺序**由周瑜决定**」—— 给哪张是反间的技术含量
+        // 所在(给一张你希望对方猜错花色的牌),以前这里是随机抽,等于把技能废掉一半
+        const picked = await game.agentOf(self).chooseCards(
+          game, self, [...self.hand], 1, 1, `反间:选择一张手牌交给 ${target.name}`,
+        );
+        const card = picked[0] ?? randomHandCard(game, self);
         if (!card) return;
         game.log(`  ${target.name} 选择了 ${suit},展示的牌是 ${cardLabel(card)}`);
         await game.gainCards(target, [card], '反间');
@@ -593,11 +632,23 @@ defineGeneral({
       },
       async effect({ game, self, event }) {
         const e = event as TargetEvent;
-        const cands = game.alivePlayers.filter(p =>
+        /*
+         * **先弃牌,再算攻击范围。**
+         *
+         * FAQ:「可以弃置装备区里的装备牌,但是计算其他角色是否在攻击范围内时,
+         * 不可以将弃置的牌算入。」—— 弃掉进攻马之后射程会缩短,按弃牌前的范围
+         * 给候选就等于凭空多了一格。以前这里顺序是反的。
+         */
+        const reachable = () => game.alivePlayers.filter(p =>
           p !== self && p !== e.from && game.inAttackRange(self, p) && !e.use.targets.includes(p));
-        if (!cands.length) return;
+        if (!reachable().length) return;
         const d = await game.askForDiscard(self, 1, '流离:弃置一张牌以转移【杀】', { includeEquip: true });
         if (!d.length) return;
+        const cands = reachable();
+        if (!cands.length) {
+          game.log(`  ${self.name} 弃牌后已无人在攻击范围内,【流离】未能转移`);
+          return;
+        }
         const chosen = await game.agentOf(self).choosePlayers(game, self, cands, 1, 1, '流离:转移给谁?');
         if (chosen[0]) {
           e.to = chosen[0];
@@ -739,6 +790,28 @@ defineGeneral({
           game, self, males, 2, 2, '离间:选择两名男性角色(先选的那名先出【杀】)', { ordered: true });
         if (chosen.length < 2) return false;
         const vc: VirtualCard = { name: '决斗', suit: 'none', rank: 0, cards: [], skill: '离间' };
+        /*
+         * **先选的那名要当【决斗】的目标,所以他必须能成为目标。**
+         *
+         * FAQ:「貂蝉能否指定空城状态下的诸葛亮为【离间】的对象之一?**可以,但是
+         * 必须指定诸葛亮为决斗的发起方(即对方先出杀)。**」
+         *
+         * 空城的诸葛亮不能成为【决斗】的目标,换句话说他只能排在后面。官方那句话
+         * 其实只留下了一种合法排布,所以这里发现顺序不合法就自动倒过来 ——
+         * 但要在战报里说清楚,别让人以为自己点的顺序被无声改掉了。
+         */
+        let [first, second] = chosen;
+        if (!game.canTarget(second, first, vc, [])) {
+          if (game.canTarget(first, second, vc, [])) {
+            game.log(`  ${first.name} 不能成为【决斗】的目标,改由他先出【杀】`);
+            [first, second] = [second, first];
+          } else {
+            game.log(`  两名角色都不能成为【决斗】的目标,【离间】未能生效`);
+            return false;
+          }
+        }
+        chosen[0] = first;
+        chosen[1] = second;
         /*
          * **方向:后选的那名视为对先选的那名使用【决斗】。**
          *

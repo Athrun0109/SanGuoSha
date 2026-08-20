@@ -193,11 +193,13 @@ def parse(sec: str):
 
 # ————————————————— 牌页 —————————————————
 
-# 牌页的效果按模式分小节,只要身份局/标准版那一节。
-# 注意 wiki 上「身分局」「身份局」两种写法都有(无懈可击那页写的是"身分局"),
-# 漏一个就会把整段官方效果当成国战条目滤掉。
-CARD_MODE_KEEP = re.compile(r'標準|标准|身[份分]局')
-CARD_MODE_DROP = re.compile(r'國戰|国战|用間|用间|BETA')
+# 牌页的效果按模式分小节。**只认标准/身份局那一节**,别的模式牌面文本都不一样:
+#   1V1  过河拆桥是"观看其手牌并弃置一张",标准版是"弃置其区域里的一张牌"
+#   3V3 / 国战 / 用间篇BETA  各有各的改动
+# 用白名单而不是黑名单 —— 黑名单漏一个模式,就会拿错版本的文本去对照实现。
+# 另外 wiki 上「身分局」「身份局」两种写法都有(无懈可击那页写的是"身分局")。
+# 「2008推廣版」是丈八蛇矛那页对标准版的叫法(同页还有个更老的「2008無印版」)
+CARD_MODE_KEEP = re.compile(r'標準|标准|身[份分]|推廣版|推广版')
 
 # 我们实现成通用的"进攻马/防御马",官方是六匹有名字的马
 HORSE_PAGES = {'-1坐骑': '进攻马', '+1坐骑': '防御马'}
@@ -226,10 +228,15 @@ def card_effect(body: str) -> str:
     if not sec:
         return ''
     parts = re.split(r'\n===\s*(.+?)\s*===\n', sec)
-    keep = [parts[0]] if parts[0].strip() else []
-    for head, text in zip(parts[1::2], parts[2::2]):
-        if CARD_MODE_KEEP.search(head) or not CARD_MODE_DROP.search(head):
-            keep.append(text)
+    heads, texts = parts[1::2], parts[2::2]
+    # 有小节时只取标准版那一节;整页没分小节(桃园结义、乐不思蜀)就取全文
+    keep = [t for h, t in zip(heads, texts) if CARD_MODE_KEEP.search(h)]
+    if not keep and parts[0].strip():
+        keep = [parts[0]]
+    if not keep and heads:
+        # 小节标题一个都没认出来 —— 退到第一节,但要吭一声,免得静默拿错版本
+        print(f'  ⚠ 小节标题不认识,退用第一节:{heads}')
+        keep = [texts[0]]
     lines = []
     for line in '\n'.join(keep).split('\n'):
         line = clean(line)

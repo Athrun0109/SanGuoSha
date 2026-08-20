@@ -9,8 +9,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkGame, give } from './helpers.js';
+import { mkGame, give, stackDeck } from './helpers.js';
+import { KEJI_HAND_CAP } from '../content/generals.js';
 import type { Player } from '../core/player.js';
+import { realCard, viewAsCard } from '../core/types.js';
 
 /** 把一张牌直接装到某人身上 */
 function equip(game: ReturnType<typeof mkGame>['game'], p: Player, name: string, suit: any, rank: number) {
@@ -318,4 +320,280 @@ test('反复取消不会把出牌阶段卡死', async () => {
   assert.ok(lines.some(l => l.includes('本阶段不再提示')), '摘掉时要说一声');
   const zhiheng = sun.allSkills.find(s => s.name === '制衡')!;
   assert.equal(game.skillAvailable(sun, zhiheng), true, '次数始终没有被消耗');
+});
+
+// ————————————————— 卡牌层:对照官方效果原文查出来的 —————————————————
+
+test('借刀杀人:不能逼人去砍空城状态的诸葛亮', async () => {
+  /*
+   * 官方 FAQ(诸葛亮页):「诸葛亮触发【空城】时,是否可以被指定为
+   * 【借刀杀人】使用【杀】的目标?**不可以。**」
+   *
+   * 以前这里只查了 inAttackRange,漏了 prohibitTarget —— 空城的诸葛亮、
+   * 谦逊的陆逊照样会被选中。引擎里有 canTarget() 这份唯一判定,直接用它。
+   */
+  const { game, agents } = mkGame({ 0: '甄姬', 1: '关羽', 2: '诸葛亮' }, 3);
+  const [me, holder, kongcheng] = game.players;
+  const weapon = give(game, holder, '青龙偃月刀', '♠', 5);
+  holder.hand.pop();
+  (holder.equips as any).weapon = weapon;
+  kongcheng.hand = [];                          // 空城成立
+  give(game, holder, '杀');                     // 他手上有杀,不会因为没杀而拒绝
+
+  let asked: string[] = [];
+  agents[0].choosePlayers = async (_g, _s, cands) => { asked = cands.map(p => p.name); return [cands[0]]; };
+
+  const spec = (await import('../core/registry.js')).cardSpecs.get('借刀杀人')!;
+  const card = give(game, me, '借刀杀人', '♣', 12);
+  await spec.onEffect!({
+    game, from: me, to: holder,
+    use: game.makeUse({ name: '借刀杀人', suit: '♣', rank: 12, cards: [card] }, me, [holder]),
+  } as any);
+
+  assert.ok(!asked.includes(kongcheng.name),
+    `空城的诸葛亮不该出现在候选里,实际候选:${asked.join('、')}`);
+
+  // 反过来:他一旦有手牌,空城不成立,就该能被选
+  give(game, kongcheng, '闪');
+  await spec.onEffect!({
+    game, from: me, to: holder,
+    use: game.makeUse({ name: '借刀杀人', suit: '♣', rank: 12, cards: [card] }, me, [holder]),
+  } as any);
+  assert.ok(asked.includes(kongcheng.name), '不在空城状态时应该能被选中');
+});
+
+test('贯石斧:可以弃自己的装备,唯独不能弃贯石斧本身', async () => {
+  // 官方 FAQ:「是否可以弃掉自己装备区里的牌?**可以,除了【贯石斧】本身。**」
+  const { game, agents } = mkGame({ 0: '甄姬', 1: '关羽', 2: '赵云' }, 3);
+  const me = game.players[0];
+  // 必须走 equipCard —— 直接往 equips 上赋值不会注册装备技能
+  await game.equipCard(me, give(game, me, '贯石斧', '♦', 5));
+  await game.equipCard(me, give(game, me, '防御马', '♥', 13));
+  give(game, me, '闪');
+
+  let pool: string[] = [];
+  agents[0].chooseCards = async (_g, _s, cards, min) => { pool = cards.map(c => c.name); return cards.slice(0, min); };
+
+  const skill = me.allSkills.find(s => s.name === '贯石斧')! as any;
+  await skill.effect({
+    game, self: me,
+    event: { use: game.makeUse({ name: '杀', suit: '♠', rank: 7, cards: [] }, me, [game.players[1]]), from: me, to: game.players[1] },
+  });
+
+  assert.ok(pool.includes('防御马'), '装备区的其他牌可以弃');
+  assert.ok(!pool.includes('贯石斧'), `贯石斧本身不该在可弃列表里,实际:${pool.join('、')}`);
+});
+
+test('五谷丰登:亮出的张数按目标数,不是按存活人数', async () => {
+  // 官方原文:「你亮出牌堆顶**等同于目标角色数**的牌」
+  const { game, agents } = mkGame({ 0: '甄姬', 1: '关羽', 2: '赵云' }, 3);
+  const me = game.players[0];
+  for (const p of game.players) agents[p.seat].chooseCards = async (_g, _s, cards) => [cards[0]];
+
+  const spec = (await import('../core/registry.js')).cardSpecs.get('五谷丰登')!;
+  const card = give(game, me, '五谷丰登', '♥', 3);
+  // 只指定两个目标(正常情况是全场,这里手动收窄以区分"目标数"和"存活人数")
+  const use = game.makeUse({ name: '五谷丰登', suit: '♥', rank: 3, cards: [card] }, me, [me, game.players[1]]);
+  await spec.onEffect!({ game, use, from: me, to: me } as any);
+
+  const revealed = (use.tags.wugu as unknown[]).length + 1;   // 已经被 me 取走一张
+  assert.equal(revealed, 2, `3 人存活但只有 2 个目标,应该亮 2 张,实际亮了 ${revealed} 张`);
+});
+
+test('方天画戟:条件是"这张杀是你最后的手牌",不是"手牌不多于一张"', async () => {
+  /*
+   * 官方 FAQ:「无手牌的刘备装备【方天画戟】,【激将】使用【杀】是否可以发动?
+   * **不能**,发动【方天画戟】的技能条件必须是使用自己最后一张手牌。」
+   *
+   * 旧写法是 `self.hand.length <= 1 ? 2 : 0` —— 手牌 0 张时照样给两个额外目标。
+   * 这条不是纸上谈兵:刘备用【仁德】把手牌全送出去(顺带回血),再靠【激将】
+   * 要一张【杀】,就能几乎每回合白嫖三个目标;关羽用【武圣】把装备区的红牌
+   * 当【杀】走的是同一条路。
+   */
+  const { game } = mkGame({ 0: '关羽', 1: '张飞', 2: '黄盖' }, 3);
+  const me = game.players[0];
+  await game.equipCard(me, give(game, me, '方天画戟', '♦', 12));
+  const spec = (await import('../core/registry.js')).cardSpecs.get('杀')!;
+  const maxOf = (vc: any) => (spec.targetMax as any)(game, me, vc);
+
+  // ——— 手上只有这一张杀:可以多打两个 ———
+  const slash = give(game, me, '杀', '♠', 7);
+  assert.equal(maxOf(realCard(slash)), 3, '最后一张手牌的杀应该能指定三个目标');
+
+  // ——— 手上还有别的牌:只能打一个 ———
+  const extra = give(game, me, '闪', '♥', 2);
+  assert.equal(maxOf(realCard(slash)), 1, '手牌不止一张时不该触发');
+  me.hand = me.hand.filter(c => c !== extra);
+
+  // ——— 手牌 0 张,杀来自装备区(武圣)或别人替你打出(激将):不该触发 ———
+  me.hand = [];
+  const equipped = me.equips.weapon!;
+  assert.equal(maxOf(viewAsCard('杀', [equipped], '武圣')), 1,
+    '装备区的牌当杀,不是"最后的手牌"');
+  assert.equal(maxOf({ name: '杀', suit: 'none', rank: 0, cards: [] } as any), 1,
+    '没有实体素材的杀(激将替打)不该触发');
+});
+
+// ————————————————— 武将层:对照官方 FAQ 查出来的 —————————————————
+
+test('流离:先弃牌再算攻击范围,弃掉的马不能算进射程', async () => {
+  /*
+   * FAQ:「大乔发动【流离】时,是否可以弃置装备区里的装备牌?**可以,但是计算
+   * 其他角色是否在攻击范围内时,不可以将弃置的牌算入。**」
+   *
+   * 以前是先算候选再问弃哪张 —— 弃掉进攻马之后射程缩短了,候选却还是按弃牌前算的。
+   */
+  // 用 5 人局:3 人局里 0 号到 2 号本来就是距离 1,进攻马根本看不出效果
+  const { game, agents } = mkGame({ 0: '大乔', 1: '关羽' }, 5);
+  const [qiao, attacker, far] = game.players;
+  assert.equal(game.distance(qiao, far), 2, '2 号位在 5 人局里距离 2');
+  await game.equipCard(qiao, give(game, qiao, '进攻马', '♦', 13));   // -1 之后才够得着
+  assert.ok(game.inAttackRange(qiao, far), '装着马时够得着');
+  give(game, qiao, '闪');
+
+  let offered: string[] = [];
+  agents[0].chooseCards = async (_g, _s, cards) => [cards.find(c => c.name === '进攻马')!];
+  agents[0].choosePlayers = async (_g, _s, cands) => { offered = cands.map(p => p.name); return [cands[0]]; };
+
+  const liuli = qiao.allSkills.find(s => s.name === '流离')! as any;
+  const use = game.makeUse({ name: '杀', suit: '♠', rank: 7, cards: [] }, attacker, [qiao]);
+  await liuli.effect({ game, self: qiao, event: { use, from: attacker, to: qiao } });
+
+  assert.ok(!offered.includes(far.name),
+    `弃掉进攻马之后 2 号位应该已经够不着,实际候选:${offered.join('、') || '(空)'}`);
+});
+
+test('青龙偃月刀:第二张杀要重新过一遍目标合法性', async () => {
+  /*
+   * FAQ(诸葛亮页):「发动【青龙偃月刀】效果时,如果在过程中诸葛亮触发【空城】,
+   * 装备【青龙偃月刀】的角色是否可以对其使用【杀】?**不可以。**」
+   */
+  const { game } = mkGame({ 0: '关羽', 1: '诸葛亮', 2: '赵云' }, 3);
+  const [me, kongcheng] = game.players;
+  await game.equipCard(me, give(game, me, '青龙偃月刀', '♠', 5));
+  give(game, me, '杀', '♣', 4);
+  const skill = me.allSkills.find(s => s.name === '青龙偃月刀')! as any;
+  const ev = { use: game.makeUse({ name: '杀', suit: '♠', rank: 7, cards: [] }, me, [kongcheng]), from: me, to: kongcheng };
+
+  give(game, kongcheng, '闪');
+  assert.equal(skill.filter({ game, self: me, event: ev, timing: 'SlashMissed' } as any), true,
+    '对方还有手牌时应该能追第二张');
+  kongcheng.hand = [];                                     // 手牌打空 -> 空城成立
+  assert.equal(skill.filter({ game, self: me, event: ev, timing: 'SlashMissed' } as any), false,
+    '对方进入空城后就不该再能追第二张');
+});
+
+test('离间:空城的诸葛亮只能当决斗的发起方', async () => {
+  /*
+   * FAQ:「貂蝉能否指定空城状态下的诸葛亮为【离间】的对象之一?**可以,但是必须
+   * 指定诸葛亮为决斗的发起方(即对方先出杀)。**」
+   *
+   * 按我们的约定"先选的先出【杀】",先选的那名就是决斗的目标 —— 而空城的诸葛亮
+   * 不能成为【决斗】的目标,所以他只能排在后面。
+   */
+  const { game, agents } = mkGame({ 0: '貂蝉', 1: '诸葛亮', 2: '赵云' }, 3);
+  const [diao, kongcheng, zhao] = game.players;
+  give(game, diao, '闪');
+  kongcheng.hand = [];                                     // 空城成立
+  for (const p of game.players) agents[p.seat].respond = () => -1;
+  // 故意把空城的诸葛亮排在先选(= 决斗目标)
+  agents[0].choosePlayers = async (_g, _s, cands) => [
+    cands.find(p => p === kongcheng)!, cands.find(p => p === zhao)!,
+  ];
+
+  const lijian = diao.allSkills.find(s => s.name === '离间')! as any;
+  await lijian.onUse(game, diao);
+
+  assert.equal(kongcheng.hp, kongcheng.maxHp, '空城的诸葛亮不该被当成决斗目标而先出杀');
+  assert.ok(zhao.hp < zhao.maxHp, '顺序应该被倒过来:赵云先出杀、接不上就掉血');
+});
+
+test('反间:由周瑜自己挑给哪张手牌,不是随机抽', async () => {
+  // FAQ:「周瑜发动【反间】时,如果有多张手牌,牌的放置顺序由谁决定?**由周瑜决定。**」
+  const { game, agents } = mkGame({ 0: '周瑜', 1: '关羽', 2: '赵云' }, 3);
+  const [yu, target] = game.players;
+  give(game, yu, '杀', '♠', 7);
+  const peach = give(game, yu, '桃', '♥', 3);
+  give(game, yu, '闪', '♦', 2);
+
+  agents[0].choosePlayers = async (_g, _s, cands) => [cands.find(p => p === target)!];
+  agents[0].chooseCards = async (_g, _s, cards) => [cards.find(c => c.id === peach.id)!];
+  agents[target.seat].chooseSuit = async () => '♠' as const;
+
+  const fanjian = yu.allSkills.find(s => s.name === '反间')! as any;
+  await fanjian.onUse(game, yu);
+
+  assert.ok(target.hand.some(c => c.id === peach.id), '给出去的应该是周瑜挑的那张【桃】');
+});
+
+test('反馈:拿不到伤害来源判定区里的牌', async () => {
+  // FAQ:「司马懿发动反馈时,是否可以获得来源判定区里的牌?**不可以**,判定区的牌不属于伤害来源的牌。」
+  const { game, agents } = mkGame({ 0: '司马懿', 1: '关羽', 2: '赵云' }, 3);
+  const [yi, src] = game.players;
+  await game.placeDelayed(src, give(game, src, '乐不思蜀', '♠', 6), '乐不思蜀');
+  src.hand = [];
+  await game.equipCard(src, give(game, src, '防御马', '♥', 13));
+
+  let zones: string[] = [];
+  agents[0].option = (opts) => { zones = [...opts]; return 0; };
+  const skill = yi.allSkills.find(s => s.name === '反馈')!;
+  await (skill as any).effect({
+    game, self: yi,
+    event: { to: yi, from: src, amount: 1, card: null, reason: '杀' },
+  });
+
+  assert.ok(zones.some(z => z.includes('装备区')), '装备区可以拿');
+  assert.ok(!zones.some(z => z.includes('判定区')),
+    `判定区不该出现在候选里,实际:${zones.join(' / ')}`);
+});
+
+test('奸雄:劈自己的那张【闪电】要收得到', async () => {
+  // FAQ:「当锦囊牌对曹操造成伤害时,曹操获得哪张牌?**只获得相应的锦囊**,
+  //       例如曹操判定【闪电】受到伤害,可以将【闪电】收入手牌。」
+  const { game, agents } = mkGame({ 0: '曹操', 1: '关羽', 2: '赵云' }, 3);
+  const cao = game.players[0];
+  const bolt = give(game, cao, '闪电', '♠', 1);
+  cao.hand.pop();
+  await game.placeDelayed(cao, bolt, '闪电');
+  stackDeck(game, [['杀', '♠', 5]]);                       // ♠5 落在 2~9,闪电必中
+  for (const p of game.players) agents[p.seat].option = () => 0;   // 一律"发动"
+
+  await (game as any).runPhase(cao, 'judge');
+
+  assert.ok(cao.hp < cao.maxHp, '闪电应该劈中了');
+  assert.ok(cao.hand.some(c => c.id === bolt.id),
+    `曹操应该用【奸雄】收走那张闪电,实际手牌:${cao.hand.map(c => c.name).join('、') || '(空)'}`);
+});
+
+test('克己:32 张以内照旧不弃牌,超过了才弃到 32(房规上限)', async () => {
+  /*
+   * 官方【克己】是"跳过弃牌阶段",手牌可以无限涨。实测 3000 局 8 人局里
+   * 出现过 66 张的吕蒙 —— 界面一行只放得下约 12 张,而 104 张手牌时
+   * 出牌阶段有 77 个选项、每次决策多烧约 1500 字。所以加了 32 张的房规上限。
+   *
+   * 关键是它**只在失控时才咬**:全场手牌峰值 p90 才 11,九成对局碰不到。
+   */
+  const { game, agents } = mkGame({ 0: '吕蒙', 1: '关羽', 2: '赵云' }, 3);
+  const me = game.players[0];
+  agents[0].option = () => 0;                                  // 一律"发动"
+  agents[0].chooseCards = async (_g, _s, cards, min) => cards.slice(0, min);
+
+  // ——— 手牌 10 张(远低于上限):一张都不该弃 ———
+  me.hand = [];
+  for (let i = 0; i < 10; i++) give(game, me, '闪', '♦', 2);
+  await game.runPhase(me, 'discard');
+  assert.equal(me.handCount, 10, `${me.hp} 点体力、10 张手牌时不该弃牌`);
+
+  // ——— 手牌 40 张:弃到 32 ———
+  me.clearMarks('turn:');
+  for (let i = 0; i < 30; i++) give(game, me, '闪', '♦', 2);
+  assert.equal(me.handCount, 40);
+  await game.runPhase(me, 'discard');
+  assert.equal(me.handCount, KEJI_HAND_CAP, `超过上限就该弃到 ${KEJI_HAND_CAP} 张`);
+
+  // ——— 本回合出过【杀】:克己不发动,按体力弃 ———
+  me.clearMarks('turn:');
+  me.addMark('turn:playedSlash');
+  await game.runPhase(me, 'discard');
+  assert.equal(me.handCount, me.hp, '出过杀就没有克己,老老实实弃到体力值');
 });

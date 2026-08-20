@@ -18,20 +18,41 @@ import { staticSkill, triggered, viewAs } from '../core/skill.js';
 
 // ————————————————— 通用工具 —————————————————
 
-/** 从某角色的区域里指定一张牌(手牌为暗置,只能随机选中) */
+/**
+ * 从某角色的区域里指定一张牌(手牌为暗置,只能随机选中)。
+ *
+ * `judgeZone: false` 表示不含判定区 —— 【过河拆桥】【顺手牵羊】的官方文本是
+ * "其**区域**里的一张牌",判定区算在内;而司马懿【反馈】写的是"伤害来源的一张牌",
+ * FAQ 明确「判定区的牌不属于伤害来源的牌」,不能拿。
+ */
 export async function pickCardFrom(
   game: Game, chooser: Player, target: Player, prompt: string,
+  opts: { judgeZone?: boolean } = {},
 ): Promise<Card | null> {
   const zones: { label: string; cards: Card[] }[] = [];
   if (target.hand.length) zones.push({ label: `手牌(${target.hand.length}张,随机一张)`, cards: target.hand });
   // 装备区也带花色点数 —— 对方装了两匹马时,只写牌名就分不清是哪一张。
   // (判定区早就带了,这里一直不一致)
   for (const c of target.equipCards) zones.push({ label: `装备区 ${cardLabel(c)}`, cards: [c] });
-  for (const c of target.judgeZone) zones.push({ label: `判定区 ${game.judgeLabel(target, c)}`, cards: [c] });
+  if (opts.judgeZone !== false) {
+    for (const c of target.judgeZone) zones.push({ label: `判定区 ${game.judgeLabel(target, c)}`, cards: [c] });
+  }
   if (!zones.length) return null;
   const idx = await game.agentOf(chooser).chooseOption(game, chooser, zones.map(z => z.label), prompt);
   const z = zones[Math.max(0, Math.min(idx, zones.length - 1))];
   return z.cards.length === 1 ? z.cards[0] : z.cards[game.rng.int(z.cards.length)];
+}
+
+/**
+ * 【借刀杀人】能逼谁去砍谁 —— 走引擎那份唯一的目标合法性判定,别自己拼条件。
+ *
+ * 以前这里只查了 `inAttackRange`,漏掉了 `prohibitTarget`:空城的诸葛亮、
+ * 谦逊的陆逊照样会被选中。官方 FAQ(诸葛亮页)明说「触发【空城】时不可以
+ * 被指定为【借刀杀人】使用【杀】的目标」。
+ */
+const SLASH_PROBE: VirtualCard = { name: '杀', suit: 'none', rank: 0, cards: [] };
+function slashableBy(game: Game, holder: Player): Player[] {
+  return game.alivePlayers.filter(v => v !== holder && game.canTarget(holder, v, SLASH_PROBE, []));
 }
 
 /** 要求打出若干张指定牌,全部打出才算成功 */
@@ -53,7 +74,9 @@ defineCard({
   name: '杀',
   type: 'basic',
   targetMin: 1,
-  targetMax: (g, from) => 1 + g.sumQuery(from, 'slashExtraTargets', {}),
+  // 把这张【杀】本身传进查询 —— 【方天画戟】要判断的是"它是不是你最后的手牌",
+  // 光看手牌数不够(见 isLastHandCard)
+  targetMax: (g, from, vc) => 1 + g.sumQuery(from, 'slashExtraTargets', { card: vc }),
   range: 'attack',
   targetFilter: (g, from, to) => to !== from,
   async onEffect({ game, use, from, to }) {
@@ -219,8 +242,9 @@ defineCard({
   autoTargets: (g, from) => g.playersFrom(from, true),
   async onEffect({ game, use, to }) {
     if (!use.tags.wugu) {
-      const n = game.alivePlayers.length;
-      const cards = game.drawFromDeck(n);
+      // 官方原文是"亮出牌堆顶**等同于目标角色数**的牌"。和存活人数通常相等,
+      // 但结算途中有人阵亡时就不一样了 —— 按原文来。
+      const cards = game.drawFromDeck(use.targets.length);
       game.processing.push(...cards);
       use.tags.wugu = cards;
       game.log(`  五谷丰登亮出:${cards.map(cardLabel).join('、')}`);
@@ -245,9 +269,9 @@ defineCard({
   targetMin: 1,
   targetMax: 1,
   targetFilter: (g, from, to) => to !== from && !!to.equips.weapon
-    && g.alivePlayers.some(v => v !== to && g.inAttackRange(to, v)),
+    && slashableBy(g, to).length > 0,
   async onEffect({ game, use, from, to }) {
-    const victims = game.alivePlayers.filter(v => v !== to && game.inAttackRange(to, v));
+    const victims = slashableBy(game, to);
     if (!victims.length) return;
     const chosen = await game.agentOf(from).choosePlayers(
       game, from, victims, 1, 1, `借刀杀人:令 ${to.name} 对谁使用【杀】?`,
@@ -311,7 +335,10 @@ defineCard({
   async delayed(game, p, card) {
     const ev = await game.judge(p, '闪电', c => c.suit === '♠' && c.rank >= 2 && c.rank <= 9);
     if (ev.success) {
-      await game.damage({ from: null, to: p, amount: 3, card: null, reason: '闪电' } as DamageEvent);
+      // 伤害要带上【闪电】这张牌本身 —— 曹操【奸雄】靠它才收得到
+      // (FAQ:「曹操判定【闪电】受到伤害,可以将【闪电】收入手牌」)。
+      // judgePhase 结算前已经把它挪进 processing,奸雄的位置检查过得去。
+      await game.damage({ from: null, to: p, amount: 3, card: realCard(card), reason: '闪电' } as DamageEvent);
     } else {
       await passLightning(game, p, card);
     }
@@ -381,6 +408,10 @@ weapon('青龙偃月刀', 3, [
     filter: ({ game, self, event }) => {
       const e = event as TargetEvent;
       if (e.from !== self || !e.to.alive) return false;
+      // 官方 FAQ(诸葛亮页):第一张【杀】把对方手牌打空、途中触发【空城】之后,
+      // 就**不能**再对他使用第二张。所以这里要重新过一遍目标合法性,
+      // 不能因为"他刚才是目标"就默认现在还能打
+      if (!game.canTarget(self, e.to, SLASH_PROBE, [])) return false;
       return game.enumerateResponses(self, { names: ['杀'] }, { mode: 'respond', purpose: 'slash' }).length > 0;
     },
     async effect({ game, self, event }) {
@@ -402,26 +433,53 @@ weapon('丈八蛇矛', 3, [
   }),
 ]);
 
+/** 发动【贯石斧】时能拿来弃的牌:手牌 + 装备,但不含贯石斧自己 */
+function discardable(self: Player): Card[] {
+  const axe = self.equips.weapon;
+  return [...self.hand, ...self.equipCards].filter(c => c !== axe);
+}
+
 weapon('贯石斧', 3, [
   triggered({
     name: '贯石斧', desc: '【杀】被闪避后,可弃两张牌令伤害依然造成',
     timing: 'SlashMissed',
     filter: ({ self, event }) => {
       const e = event as TargetEvent;
-      return e.from === self && [...self.hand, ...self.equipCards].length >= 2;
+      // 官方 FAQ:可以弃自己装备区的牌,**唯独不能弃【贯石斧】本身** ——
+      // 所以数够不够两张的时候也得把它排除掉
+      return e.from === self && discardable(self).length >= 2;
     },
     async effect({ game, self, event }) {
       const e = event as TargetEvent;
-      const d = await game.askForDiscard(self, 2, '贯石斧:弃置两张牌令【杀】仍然造成伤害', { includeEquip: true });
+      const d = await game.askForDiscard(self, 2, '贯石斧:弃置两张牌令【杀】仍然造成伤害', {
+        includeEquip: true, exclude: self.equips.weapon ? [self.equips.weapon] : [],
+      });
       if (d.length === 2) e.use.tags[`force:${e.to.seat}`] = true;
     },
   }),
 ]);
 
+/**
+ * 【方天画戟】的条件是「使用的这张【杀】**是你最后的手牌**」,不是「手牌不多于一张」。
+ *
+ * 差别在两头:
+ *  - **手牌 0 张**时旧写法照样给两个额外目标,而官方 FAQ 明说不行 ——
+ *    「无手牌的刘备装备【方天画戟】,【激将】使用【杀】是否可以发动?**不能**」。
+ *    这不是纸上谈兵:刘备用【仁德】把手牌全送出去(顺带回血),再靠【激将】要一张
+ *    【杀】,就能几乎每回合白嫖三个目标;关羽用【武圣】把装备区的红牌当【杀】
+ *    也是同一条路。
+ *  - 反过来,**素材必须来自手牌且刚好用光** —— 装备区的牌、别人替你打出的牌都不算。
+ */
+function isLastHandCard(self: Player, vc?: VirtualCard): boolean {
+  if (!vc?.cards.length) return false;                       // 不消耗实体牌的转化
+  return self.hand.length === vc.cards.length && vc.cards.every(c => self.hand.includes(c));
+}
+
 weapon('方天画戟', 4, [
   staticSkill({
-    name: '方天画戟', desc: '你的最后一张手牌当【杀】使用时,可以指定至多三个目标',
-    queries: { slashExtraTargets: (g, self) => (self.hand.length <= 1 ? 2 : 0) },
+    name: '方天画戟', desc: '锁定技,若你使用的【杀】是你最后的手牌,则此【杀】可以多指定两个目标',
+    compulsory: true,
+    queries: { slashExtraTargets: (g, self, ctx) => (isLastHandCard(self, ctx?.card) ? 2 : 0) },
   }),
 ]);
 
