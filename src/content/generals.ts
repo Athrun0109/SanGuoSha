@@ -9,7 +9,7 @@
  *   改完直接 npm run sim 跑几百局看胜率变化。
  */
 
-import { cardLabel, suitColor, viewAsCard, VirtualCard, Card } from '../core/types.js';
+import { cardLabel, suitColor, vcLabel, viewAsCard, VirtualCard, Card } from '../core/types.js';
 import type {
   AskForCardEvent, CardUseEvent, CardsMovedEvent, DamageEvent, DrawNumberEvent,
   DyingEvent, HpEvent, JudgeEvent, PhaseEvent, TargetEvent,
@@ -274,6 +274,9 @@ defineGeneral({
 
 // ==================== 蜀 ====================
 
+/** 【激将】主动发起时用的"一张【杀】" —— 没有实体素材,只用来算射程和目标数 */
+const JIJIANG_SLASH: VirtualCard = { name: '杀', suit: 'none', rank: 0, cards: [], skill: '激将' };
+
 defineGeneral({
   name: '刘备', kingdom: 'shu', gender: 'male', hp: 4,
   skills: [
@@ -303,6 +306,52 @@ defineGeneral({
           self.setMark('turn:仁德回血', 1);
           await game.recover(self, 1, self, '仁德');
         }
+      },
+    }),
+    /*
+     * 【激将】有**两条路**,官方文本"你需要使用**或**打出【杀】时"里的两个动词各占一条:
+     *
+     *   打出 —— 下面那条 triggered,挂 AskingForCard。你被要求打出【杀】
+     *           (决斗、南蛮)时,蜀将替你出。
+     *   使用 —— 这条 active,进出牌菜单。你**主动**发起一张【杀】,自己没有,
+     *           让蜀将提供。10 条 FAQ 里大半讲的是这一条。
+     *
+     * 关键是这张【杀】**视为刘备使用**(`use.from` 就是他),于是一堆裁定自动成立:
+     *   - 响应方的【铁骑】不触发(filter 认 `e.from === self`)
+     *   - 刘备自己的贯石斧/青龙/雌雄照常触发
+     *   - 【方天画戟】不触发 —— 这张杀不是刘备的手牌(见 isLastHandCard)
+     *   - 伤害来源和击杀奖惩都算刘备
+     * 响应方那边走的是他**自己**的选项枚举,所以他能用武圣/龙胆/丈八提供杀,
+     * 但用不了刘备的丈八,也发动不了自己的其他武器技能。
+     */
+    active({
+      name: '激将', lordSkill: true,
+      desc: '主公技。出牌阶段,你可以令其他蜀势力角色替你打出一张【杀】(视为你使用)',
+      canUse: (g, self) => {
+        if (!g.others(self).some(p => p.kingdom === 'shu')) return false;
+        if (self.mark('turn:slashUsed') >= g.slashLimit(self)) return false;
+        return g.alivePlayers.some(t => g.canTarget(self, t, JIJIANG_SLASH, []));
+      },
+      async onUse(game, self) {
+        const targets = await game.selectTargets(self, JIJIANG_SLASH);
+        if (!targets?.length) return false;
+        const who = targets.map(t => t.name).join('、');
+        for (const p of game.playersFrom(self, false)) {
+          if (p.kingdom !== 'shu') continue;
+          // 用 askForUse 而不是 askForCard:前者只把牌交出来、不弃置,
+          // 由刘备去 useCard —— 这张杀是**他使用**的,不是响应方打出的
+          const vc = await game.askForUse(
+            p, { names: ['杀'] }, 'slash', `激将:是否替主公 ${self.name} 对 ${who} 提供一张【杀】?`,
+          );
+          if (!vc) continue;
+          game.log(`  ${p.name} 响应【激将】,提供 ${vcLabel(vc)}`);
+          self.addMark('turn:slashUsed');          // 这张杀占刘备本回合的出杀次数
+          await game.useCard(game.makeUse(vc, self, targets));
+          return;
+        }
+        // 没人响应 —— 什么都没发生,可以换个目标再来,也可以改做别的
+        game.log(`  没有蜀势力角色响应【激将】`);
+        return false;
       },
     }),
     triggered({

@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 
 import { mkGame, give, stackDeck } from './helpers.js';
 import { KEJI_HAND_CAP } from '../content/generals.js';
+import { CANCEL_LIMIT } from '../core/game.js';
 import type { Player } from '../core/player.js';
 import { realCard, viewAsCard } from '../core/types.js';
 
@@ -299,7 +300,7 @@ test('反复取消不会把出牌阶段卡死', async () => {
    * 取消不扣次数是对的,但"可以无限重选"就成了死循环:
    * 点技能 → 取消 → 技能又回到菜单 → 再点。真实事故:llm.test 里那个
    * 总是返回最少张数的假客户端每次都取消,一个文件从 29s 变成跑不完。
-   * 给两次反悔的余地,超了就把它从本阶段菜单里摘掉(下回合照常)。
+   * 给几次反悔的余地(CANCEL_LIMIT),超了就把它从本阶段菜单里摘掉(下回合照常)。
    */
   const { game, agents } = mkGame({ 0: '孙权', 1: '关羽', 2: '赵云' }, 3);
   const sun = game.players[0];
@@ -316,7 +317,7 @@ test('反复取消不会把出牌阶段卡死', async () => {
   };
   await (game as any).playPhase(sun);
 
-  assert.equal(picks, 2, `应该只让他反悔 2 次,实际点了 ${picks} 次`);
+  assert.equal(picks, CANCEL_LIMIT, `应该只让他反悔 ${CANCEL_LIMIT} 次,实际点了 ${picks} 次`);
   assert.ok(lines.some(l => l.includes('本阶段不再提示')), '摘掉时要说一声');
   const zhiheng = sun.allSkills.find(s => s.name === '制衡')!;
   assert.equal(game.skillAvailable(sun, zhiheng), true, '次数始终没有被消耗');
@@ -596,4 +597,194 @@ test('克己:32 张以内照旧不弃牌,超过了才弃到 32(房规上限)', a
   me.addMark('turn:playedSlash');
   await game.runPhase(me, 'discard');
   assert.equal(me.handCount, me.hp, '出过杀就没有克己,老老实实弃到体力值');
+});
+
+test('濒死结算插在两个伤害时机中间', async () => {
+  /*
+   * 四个武将的 FAQ 是同一句话:「进入濒死状态时不可以发动,**除非被救回**」——
+   * 曹操【奸雄】、司马懿【反馈】、夏侯惇【刚烈】、郭嘉【遗计】。
+   *
+   * 以前 DamageDone 排在 enterDying 前面,于是郭嘉会先摸两张【遗计】牌分给队友、
+   * **然后**才死(那两张不随死亡弃置,等于凭空送人),夏侯惇会先用【刚烈】
+   * 让来源弃牌或掉血再自己死。这是实打实的强度差,不是表现差异。
+   *
+   * 但**不能**把两个时机都挪到濒死之后:【麒麟弓】挂的是 DamageDealt,
+   * 它的 FAQ 要求恰好相反 —— 先弃坐骑(可触发【枭姬】)、然后才濒死。
+   */
+  // ——— 没被救回:不触发【遗计】 ———
+  {
+    const { game, agents } = mkGame({ 0: '郭嘉', 1: '关羽', 2: '赵云' }, 3);
+    const [jia, src, ally] = game.players;
+    jia.hp = 1;
+    for (const p of game.players) agents[p.seat].respond = () => -1;   // 没人出桃
+    agents[0].option = () => 0;                                        // 一律"发动"
+    const before = ally.handCount;
+    // 主公阵亡会抛 GameOver(胜负判定),这里只关心技能有没有发动
+    await game.damage({ from: src, to: jia, amount: 1, card: null, reason: '杀' } as any)
+      .catch(() => {});
+    assert.equal(jia.alive, false, '没人救就该死');
+    assert.equal(ally.handCount, before, '死掉的郭嘉不该还把【遗计】牌分出去');
+  }
+
+  // ——— 被救回:照常触发 ———
+  {
+    const { game, agents } = mkGame({ 0: '郭嘉', 1: '关羽', 2: '赵云' }, 3);
+    const [jia, src, ally] = game.players;
+    jia.hp = 1;
+    // 桃要给郭嘉自己 —— enterDying 会跳过伤害来源,不问"要不要救你刚砍的人"
+    give(game, jia, '桃', '♥', 3);
+    for (const p of game.players) agents[p.seat].respond = () => 0;    // 有桃就出
+    agents[0].option = () => 0;
+    agents[0].choosePlayers = async (_g, _s, cands) => [cands.find(p => p === ally)!];
+    const before = ally.handCount;
+    await game.damage({ from: src, to: jia, amount: 1, card: null, reason: '杀' } as any).catch(() => { /* 阵亡可能触发胜负判定 */ });
+    assert.equal(jia.alive, true, '有桃应该被救回');
+    assert.equal(ally.handCount, before + 2, '救回之后【遗计】照常发动,两张牌分出去');
+  }
+
+  // ——— 麒麟弓仍然在濒死之前:先弃马、枭姬摸牌,再濒死 ———
+  {
+    const { game, agents } = mkGame({ 0: '关羽', 1: '孙尚香', 2: '赵云' }, 3);
+    const [me, xiang] = game.players;
+    await game.equipCard(me, give(game, me, '麒麟弓', '♥', 5));
+    await game.equipCard(xiang, give(game, xiang, '防御马', '♥', 13));
+    xiang.hp = 1;
+    stackDeck(game, [['桃', '♥', 3], ['闪', '♦', 2]]);                // 枭姬会摸到一张桃
+    for (const p of game.players) agents[p.seat].option = () => 0;
+    agents[xiang.seat].respond = () => 0;                              // 濒死时用摸到的桃自救
+
+    await game.damage({ from: me, to: xiang, amount: 1, card: { name: '杀', suit: '♠', rank: 7, cards: [] } as any, reason: '杀' } as any).catch(() => { /* 阵亡可能触发胜负判定 */ });
+    assert.equal(xiang.equips['horse+1'], undefined, '麒麟弓应该已经弃掉了坐骑');
+    assert.equal(xiang.alive, true, '枭姬先摸到桃,所以濒死时救得回来');
+  }
+});
+
+test('武圣拿装备当【杀】时,那张装备的效果已经不算数了', async () => {
+  /*
+   * 官方 FAQ:「关羽是否可以将装备区里的红色的牌当作【杀】使用或打出?**可以,
+   * 但是需要装备提供的距离或攻击范围或武器技能时,不能将该装备打出。**
+   * 例如关羽装备了方块【诸葛连弩】使用过【杀】之后,就不能再把这张【诸葛连弩】
+   * 当【杀】使用了。」
+   *
+   * 机制上是"转化在前、出牌在后":装备变成【杀】的那一刻就离开装备区了,
+   * 所以判合法性时得当它不在(engine 侧是 game.asIfGone)。
+   */
+  // ——— 例一:♦诸葛连弩,本回合已经出过杀 -> 不能再把连弩当杀 ———
+  {
+    const { game } = mkGame({ 0: '关羽', 1: '张飞', 2: '黄盖' }, 3);
+    const me = game.players[0];
+    game.current = me;
+    await game.equipCard(me, give(game, me, '诸葛连弩', '♦', 1));
+    const labels = () => ((game as any).enumerateUsable(me) as Array<{ label: string }>)
+      .map(o => o.label);
+
+    assert.ok(labels().some(l => l.includes('杀') && l.includes('武圣')),
+      '还没出过杀时,连弩可以当杀用');
+    me.addMark('turn:slashUsed');                       // 本回合出过一张杀了
+    assert.ok(!labels().some(l => l.includes('杀') && l.includes('武圣')),
+      '连弩一旦被当成素材,"无次数限制"就没了,这张杀超次数、不该出现在菜单里');
+  }
+
+  // ——— 例二:贯石斧(射程3)打距离 3 的目标 -> 不能拿贯石斧当杀 ———
+  {
+    const { game } = mkGame({ 0: '关羽' }, 7);           // 7 人局,0 号到 3 号距离 3
+    const me = game.players[0];
+    const far = game.players[3];
+    game.current = me;
+    await game.equipCard(me, give(game, me, '贯石斧', '♦', 5));
+    assert.equal(game.distance(me, far), 3);
+    assert.ok(game.inAttackRange(me, far), '带着贯石斧时够得着');
+
+    const vc = viewAsCard('杀', [me.equips.weapon!], '武圣');
+    const reach = game.asIfGone(vc.cards, () => game.canTarget(me, far, vc, []));
+    assert.equal(reach, false, '把贯石斧当杀打出去之后射程掉回 1,够不着距离 3 的人');
+    // 手上另有一张红牌时,贯石斧还在,就够得着
+    const red = give(game, me, '桃', '♥', 3);
+    const vc2 = viewAsCard('杀', [red], '武圣');
+    assert.equal(game.asIfGone(vc2.cards, () => game.canTarget(me, far, vc2, [])), true,
+      '素材是手牌时,贯石斧还在装备区,射程照旧');
+  }
+});
+
+test('激将:刘备可以在出牌阶段主动发起,由蜀将提供【杀】', async () => {
+  /*
+   * 官方文本是"你需要**使用或打出**【杀】时",两个动词各是一条路。以前只实现了
+   * "打出"(被要求响应时),刘备没法主动起一张杀 —— 10 条 FAQ 里大半落空。
+   */
+  const { game, agents } = mkGame({ 0: '刘备', 1: '关羽', 2: '黄盖' }, 3);
+  const [liu, guan, victim] = game.players;
+  game.current = liu;
+  liu.hand = [];                                       // 刘备自己一张牌都没有
+  give(game, guan, '杀', '♠', 7);
+
+  const jijiang = liu.allSkills.find(s => s.kind === 'active' && s.name === '激将')! as any;
+  assert.equal(jijiang.canUse(game, liu), true, '有蜀将、有合法目标时应该能发动');
+
+  agents[0].choosePlayers = async (_g, _s, cands) => [cands.find(p => p === victim)!];
+  agents[guan.seat].respond = () => 0;                 // 关羽愿意提供
+  agents[victim.seat].respond = () => -1;              // 黄盖没有闪
+  const before = victim.hp;
+  await jijiang.onUse(game, liu);
+
+  assert.equal(victim.hp, before - 1, '这张【杀】应该真的打出去并造成伤害');
+  assert.equal(liu.mark('turn:slashUsed'), 1, '要占刘备本回合的出杀次数');
+  assert.equal(jijiang.canUse(game, liu), false, '次数用完就不能再发动了');
+});
+
+test('激将提供的【杀】视为刘备使用 —— 一串裁定跟着自动成立', async () => {
+  /*
+   * FAQ 里这几条都靠 `use.from` 是刘备来保证:
+   *   - 响应方的【铁骑】不触发(「不能发动影响这张杀效果的武将技」)
+   *   - 刘备是伤害来源,承担一切反馈和奖惩
+   *   - 【方天画戟】不能发动(「必须是使用自己最后一张手牌」)
+   */
+  const { game, agents } = mkGame({ 0: '刘备', 1: '马超', 2: '黄盖' }, 3);
+  const [liu, machao, victim] = game.players;
+  game.current = liu;
+  liu.hand = [];
+  await game.equipCard(liu, give(game, liu, '方天画戟', '♦', 12));
+  give(game, machao, '杀', '♠', 7);
+
+  const jijiang = liu.allSkills.find(s => s.kind === 'active' && s.name === '激将')! as any;
+  // 方天画戟:刘备手牌 0 张,但这张杀不是他的手牌 -> 只能选一个目标
+  const spec = (await import('../core/registry.js')).cardSpecs.get('杀')!;
+  assert.equal((spec.targetMax as any)(game, liu, { name: '杀', suit: 'none', rank: 0, cards: [] }), 1,
+    '【方天画戟】不该因为"手牌 0 张"就给额外目标');
+
+  let tieqiFired = false;
+  const origJudge = game.judge.bind(game);
+  (game as any).judge = async (p: any, reason: string, ...rest: any[]) => {
+    if (reason === '铁骑') tieqiFired = true;
+    return origJudge(p, reason, ...(rest as [any]));
+  };
+  agents[0].choosePlayers = async (_g, _s, cands) => [cands.find(p => p === victim)!];
+  agents[machao.seat].respond = () => 0;
+  agents[victim.seat].respond = () => -1;
+  agents[machao.seat].option = () => 0;                // 马超若被问就"发动"
+
+  const before = victim.hp;
+  await jijiang.onUse(game, liu);
+
+  assert.equal(tieqiFired, false, '响应方马超的【铁骑】不该触发 —— 这张杀是刘备使用的');
+  assert.equal(victim.hp, before - 1);
+  assert.equal(game.hostility(liu, victim), 1, '伤害来源应该记在刘备头上');
+});
+
+test('激将没人响应时:什么都没发生,次数不消耗', async () => {
+  // FAQ:「刘备发动【激将】没有角色响应后,是否可以自己出【杀】?**可以。**
+  //       …是否可以更换【杀】的目标继续发动?**可以。**」
+  const { game, agents } = mkGame({ 0: '刘备', 1: '关羽', 2: '黄盖' }, 3);
+  const [liu, , victim] = game.players;
+  game.current = liu;
+  liu.hand = [];
+  agents[0].choosePlayers = async (_g, _s, cands) => [cands.find(p => p === victim)!];
+  for (const p of game.players) agents[p.seat].respond = () => -1;   // 没人给
+
+  const jijiang = liu.allSkills.find(s => s.kind === 'active' && s.name === '激将')! as any;
+  const r = await jijiang.onUse(game, liu);
+
+  assert.equal(r, false, '没人响应要报"没发动",这样次数才不会被吃掉');
+  assert.equal(liu.mark('turn:slashUsed'), 0, '不该占出杀次数');
+  assert.equal(victim.hp, victim.maxHp);
+  assert.equal(jijiang.canUse(game, liu), true, '还能再来一次(换个目标)');
 });

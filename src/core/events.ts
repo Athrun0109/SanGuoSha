@@ -29,8 +29,10 @@ export type Timing =
   | 'AskingForCard'      // 引擎向某人求牌(护驾/激将:可直接写 ev.result)
   // —— 体力 ——
   | 'DamageInflicting'   // 伤害即将造成(可改 ev.amount / ev.cancel)
-  | 'DamageDone'         // 伤害已造成(受伤者视角:奸雄/反馈/刚烈/遗计)
-  | 'DamageDealt'        // 伤害已造成(伤害来源视角)
+  // 下面这两个**跨在濒死结算的两侧**,不是同义词。改动前先看 game.damage() 里的注释:
+  | 'DamageDealt'        // 造成伤害时,**濒死之前**(伤害来源视角:麒麟弓)
+  | 'DamageDone'         // 受到伤害后,**濒死之后、且活下来才触发**
+                         //   (受伤者视角:奸雄/反馈/刚烈/遗计)
   | 'HpLost'             // 失去体力
   | 'HpRecovered'        // 回复体力
   | 'Dying'              // 濒死

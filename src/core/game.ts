@@ -74,6 +74,16 @@ export class RNG {
   }
 }
 
+/**
+ * 同一个技能在一个出牌阶段里最多能反悔几次,超了就从菜单里摘掉。
+ *
+ * 3 而不是 2:【激将】主动发起时,"没有蜀势力角色响应"也走同一条路,而官方 FAQ 明说
+ * 「没人响应后**可以更换目标继续发动**」。给三次余地,既照顾到那条裁定,
+ * 又保住这个上限本来的用途 —— 防止反复取消把出牌阶段卡死(那次是 llm.test 里
+ * 总是返回最少张数的假客户端,一个文件从 29s 变成跑不完)。
+ */
+export const CANCEL_LIMIT = 3;
+
 export class Game {
   players: Player[] = [];
   agents = new Map<Player, Agent>();
@@ -196,8 +206,37 @@ export class Game {
 
   // ————————————————— 查询系统 —————————————————
 
+  /**
+   * **把这几张牌当作已经不在场**,再做判定。
+   *
+   * 转化技拿装备当素材时用:【武圣】把装备区的红牌当【杀】,那张装备在"使用【杀】"
+   * 之前就已经离开装备区了,所以判合法性时得当它不在。官方 FAQ 的两个例子:
+   *   - 装♦【诸葛连弩】且本回合出过【杀】—— 不能再把连弩当【杀】(无次数限制没了)
+   *   - 装【贯石斧】(射程3)打距离 3 的目标 —— 不能拿贯石斧当【杀】(射程掉回 1)
+   *
+   * 只影响**状态技的查询**(射程、次数上限、距离…),不真的动牌,所以是同步的、
+   * 也不会触发任何时机。
+   */
+  private asIfGoneCards: Set<Card> | null = null;
+
+  asIfGone<T>(cards: Card[], fn: () => T): T {
+    if (!cards.length) return fn();
+    const prev = this.asIfGoneCards;
+    this.asIfGoneCards = new Set(cards);
+    try { return fn(); } finally { this.asIfGoneCards = prev; }
+  }
+
   private statics(p: Player) {
-    return p.allSkills.filter(s => s.kind === 'static' && this.skillEnabled(p, s));
+    const out = p.skills.filter(s => s.kind === 'static' && this.skillEnabled(p, s));
+    // 装备技能按槽位走,才知道每条技能是哪张牌带来的 —— allSkills 拍平之后就对不上了
+    for (const [slot, list] of p.equipSkills) {
+      const card = p.equips[slot];
+      if (card && this.asIfGoneCards?.has(card)) continue;
+      for (const s of list) {
+        if (s.kind === 'static' && this.skillEnabled(p, s)) out.push(s);
+      }
+    }
+    return out;
   }
 
   sumQuery(owner: Player, name: string, ctx: any): number {
@@ -735,9 +774,24 @@ export class Game {
       this.hostilityLog.set(k, (this.hostilityLog.get(k) ?? 0) + ev.amount);
     }
     this.log(`  ${ev.from ? ev.from.name + ' 对 ' : ''}${ev.to.name} 造成 ${ev.amount} 点伤害 (${ev.to.name} ${ev.to.hp}/${ev.to.maxHp})`);
-    await this.trigger('DamageDone', ev);
+    /*
+     * **濒死结算插在两个伤害时机中间。** 这两个时机看着像重复,其实分居两侧:
+     *
+     *   DamageDealt  "造成伤害时"  —— 麒麟弓。必须在濒死**之前**:
+     *     官方 FAQ 举的例子是攻击 1 血、带 +1 马的孙尚香 —— 先弃掉坐骑(此时可以
+     *     发动【枭姬】摸两张),**然后**她才进入濒死。摸到桃就能自救。
+     *
+     *   DamageDone   "受到伤害后"  —— 奸雄 / 反馈 / 刚烈 / 遗计。必须在濒死**之后**,
+     *     而且只有活下来才结算。四个武将的 FAQ 说的是同一句话:
+     *     「进入濒死状态时不可以发动,**除非被救回**」。
+     *
+     * 以前两个时机都排在濒死前面,区分等于没落实,后果是实打实的强度差:郭嘉会先摸
+     * 两张【遗计】牌分给队友**然后**才死(那两张不会随死亡弃置,等于凭空送人);
+     * 夏侯惇会先用【刚烈】让来源弃牌或掉血,然后自己死。
+     */
     await this.trigger('DamageDealt', ev);
     if (ev.to.hp <= 0) await this.enterDying(ev.to, ev.from ?? null);
+    if (ev.to.alive) await this.trigger('DamageDone', ev);
   }
 
   async loseHp(p: Player, amount: number, reason = ''): Promise<void> {
@@ -957,7 +1011,8 @@ export class Game {
       if (!cardSpecs.has(vc.name)) return;
       const key = `${vc.name}|${vc.skill ?? ''}|${vc.cards.map(c => c.id).sort().join(',')}`;
       if (seen.has(key)) return;
-      if (!this.canUseNow(p, vc)) return;
+      // 素材里的装备在"使用"之前就已经离开装备区了 —— 判定时当它不在(见 asIfGone)
+      if (!this.asIfGone(vc.cards, () => this.canUseNow(p, vc))) return;
       seen.add(key);
       out.push({ card: vc, label: vcLabel(vc) });
     };
@@ -972,7 +1027,8 @@ export class Game {
       } else if (s.cardCount === 1) {
         for (const c of pool) { const vc = s.viewAs(this, p, [c], ctx); if (vc) consider(vc); }
       } else if (s.cardCount >= 2) {
-        const rep = this.firstCombo(p, s, pool, ctx, vc => cardSpecs.has(vc.name) && this.canUseNow(p, vc));
+        const rep = this.firstCombo(p, s, pool, ctx,
+          vc => cardSpecs.has(vc.name) && this.asIfGone(vc.cards, () => this.canUseNow(p, vc)));
         if (rep) out.push({ card: rep, label: deferredLabel(rep), pick: { skill: s, count: s.cardCount, pool, ctx } });
       }
     }
@@ -1016,10 +1072,13 @@ export class Game {
   async selectTargets(p: Player, vc: VirtualCard): Promise<Player[] | null> {
     const spec = getSpec(vc.name);
     if (spec.autoTargets) return spec.autoTargets(this, p, vc);
-    const min = this.resolveNum(spec.targetMin, p, vc);
-    const max = this.resolveNum(spec.targetMax, p, vc);
+    // 同上:素材里的装备已经不算数了,射程和"多打几个目标"都要按没有它来算
+    const { min, max, cands } = this.asIfGone(vc.cards, () => ({
+      min: this.resolveNum(spec.targetMin, p, vc),
+      max: this.resolveNum(spec.targetMax, p, vc),
+      cands: this.alivePlayers.filter(t => this.canTarget(p, t, vc, [])),
+    }));
     if (max === 0) return [];
-    const cands = this.alivePlayers.filter(t => this.canTarget(p, t, vc, []));
     if (cands.length < min) return null;
     const chosen = await this.agentOf(p).choosePlayers(
       this, p, cands, min, Math.min(max, cands.length), `为 ${vcLabel(vc)} 选择目标`,
@@ -1038,7 +1097,7 @@ export class Game {
      * 所以给几次反悔的余地,超了就把它从**本阶段**菜单里摘掉(下回合照常)。
      */
     const canceled = new Map<Skill, number>();
-    const CANCEL_LIMIT = 2;
+
     for (let guard = 0; guard < 100 && p.alive; guard++) {
       const actions: PlayAction[] = [];
       for (const o of this.enumerateUsable(p)) {
