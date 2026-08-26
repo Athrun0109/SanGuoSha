@@ -231,3 +231,51 @@ test('战报按字数封顶,不是按行数', () => {
   assert.match(eventsBlock(lines, c, 1), /短行8/);
   assert.equal(eventsBlock([], c, 100), '', '没内容时不占位');
 });
+
+// ————————————————— 明牌开关(对照实验用) —————————————————
+
+test('明牌:只给队友,只在阵营公开的模式,而且默认关', () => {
+  /*
+   * 这是对照实验的旋钮,不是游戏规则 —— 用来把"配合差"拆成
+   * *信息缺失* 和 *协商能力* 两半。三条边界必须钉死:
+   *  1. 默认关
+   *  2. 只露队友,不露敌人
+   *  3. 身份局里一律不生效 —— 那里"谁是队友"正是要猜的东西,
+   *     按真实身份挑人明牌等于把身份表泄进提示词
+   */
+  const g = createGame({
+    mode: 'team2v2', playerCount: 4, seed: 7, log: () => {},
+    fixedGenerals: { 0: '赵云', 1: '周瑜', 2: '关羽', 3: '甘宁' },
+    makeAgent: () => new BasicAI('x'),
+  });
+  const [me, foeA, foeB, mate] = [g.players[0], g.players[1], g.players[2], g.players[3]];
+  assert.equal(me.role, mate.role, '0/3 同队');
+  assert.notEqual(me.role, foeA.role);
+  for (const p of g.players) p.hand = [];
+  give(g, mate, '桃', '♥', 5);
+  give(g, foeA, '无懈可击', '♠', 9);
+  give(g, foeB, '决斗', '♣', 4);
+  const c = new Codec(g, 'verbose');
+
+  const off = situationBlock(g, me, c);
+  assert.doesNotMatch(off, /桃\[♥5\]/, '默认必须看不见队友手牌');
+
+  const on = situationBlock(g, me, c, { teamHands: true });
+  assert.match(on, /队友明牌.*桃\[♥5\]/, '开了才看得见队友的');
+  assert.doesNotMatch(on, /无懈可击\[♠9\]/, '敌人的手牌永远不能露');
+  assert.doesNotMatch(on, /决斗\[♣4\]/);
+});
+
+test('明牌:身份局里开了也不生效 —— 否则等于把身份表写进提示词', () => {
+  // 拿两个**反贼**来试 —— 他们的 role 字面上就相同,
+  // 也就是说挡住这次泄露的只能是 mode.hidden 那道闸,而不是碰巧对不上
+  const g = mk({}, 5);
+  const rebels = g.players.filter(p => p.role === 'rebel');
+  assert.equal(rebels.length, 2, '五人局是 1主1忠2反1内');
+  const [me, same] = rebels;
+  for (const p of g.players) p.hand = [];
+  give(g, same, '闪', '♦', 2);
+  const text = situationBlock(g, me, new Codec(g, 'verbose'), { teamHands: true });
+  assert.doesNotMatch(text, /闪\[♦2\]/, '身份局里这个旋钮必须是空操作');
+  assert.doesNotMatch(text, /队友明牌/);
+});

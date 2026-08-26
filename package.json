@@ -4,11 +4,13 @@
   "description": "三国杀标准版规则引擎(纯文本 / 可 DIY 武将技能)",
   "type": "module",
   "scripts": {
+    "bench": "tsx src/cli/bench.ts",
     "duel": "tsx src/cli/duel.ts",
     "generals": "tsx src/cli/generals.ts",
     "join": "tsx src/cli/join.ts",
     "log": "tsx src/cli/logview.ts",
     "mcp": "tsx src/mcp/server.ts",
+    "metrics": "tsx src/cli/metrics.ts",
     "models": "tsx src/cli/models.ts",
     "play": "tsx src/cli/play.ts",
     "replay": "tsx src/cli/replay.ts",

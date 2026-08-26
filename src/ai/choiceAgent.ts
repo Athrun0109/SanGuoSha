@@ -15,6 +15,27 @@ import type { Player } from '../core/player.js';
 import { Card, SUITS, Suit } from '../core/types.js';
 import { Codec, type CodecMode } from './codec.js';
 
+/**
+ * **只剩一个合法目标时,在出牌菜单里就写明白是谁。**
+ *
+ * 真实事故(20260821-202633,2v2):赵云装着诸葛连弩,想打对面 1 血的诸葛亮 ——
+ * 它的推理原文是「我射程1正好够到P0,先出杀打P0…先解决P0最关键」。可诸葛亮手牌为 0、
+ * **空城**成立,不能成为【杀】的目标;关羽距离 2 够不着。于是唯一合法目标是**队友周瑜**。
+ *
+ * 而"只有一个合法解就直接选掉"那条捷径会把这道题跳过去 —— 模型根本没被问,
+ * 也就无从知道意图落空了。它连着把两张【杀】打在了自己队友身上,第二张还是按
+ * 它自己那份"若被救回再补刀"的计划打的(计划是在"目标是 P0"的前提下写的)。
+ *
+ * 所以这不是判断失误,是**信息在选动作那一刻不可见**。只在"目标唯一"时加这个后缀:
+ * 那正好是会被自动选掉、因而最需要提前说清的情形;目标有两个以上时玩家本来就会被问到。
+ */
+function forcedTarget(game: Game, self: Player, a: PlayAction, c: Codec): string {
+  if (a.kind !== 'card') return '';
+  const t = game.targetOptions(self, a.card);
+  if (!t || t.max < 1 || t.cands.length !== 1) return '';
+  return `(只能指定 ${c.player(t.cands[0], self)})`;
+}
+
 export abstract class ChoiceAgent implements Agent {
   abstract readonly id: string;
   /** 人类座位会覆写成 true(引擎据此决定要不要打印提示) */
@@ -52,7 +73,7 @@ export abstract class ChoiceAgent implements Agent {
   async choosePlayAction(game: Game, self: Player, actions: PlayAction[]): Promise<number> {
     const c = this.c(game);
     const opts = actions.map(a =>
-      a.kind === 'card' ? `出 ${c.text(a.label)}`
+      a.kind === 'card' ? `出 ${c.text(a.label)}${forcedTarget(game, self, a, c)}`
         : a.kind === 'skill' ? `技能 ${c.skill(a.skill.name)}`
           : '结束出牌阶段');
     const r = await this.ask(game, self, '出牌阶段,选一个动作', opts, 1, 1, 'playAction');

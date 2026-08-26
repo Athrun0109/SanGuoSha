@@ -12,6 +12,7 @@ import { createGame } from '../core/setup.js';
 import { BasicAI } from '../ai/basicAI.js';
 import { LLMAgent, type LLMClient } from '../ai/llmAgent.js';
 import { CARD_CODE, missingCodes } from '../ai/codec.js';
+import { cardLabel } from '../core/types.js';
 import { countCards, countGroup } from '../ai/cardCounter.js';
 import { generals } from '../core/registry.js';
 import { DECK_TABLE } from '../content/cards.js';
@@ -272,4 +273,54 @@ test('记牌器:公开进入他人手牌的牌不再算未知', async () => {
   const known = countCards(game, me);
   assert.equal(known.get('桃')!.unknown, blindUnknown - 1);
   assert.equal(known.holdChance(foe, '桃'), 1, '已确认对方持有就是 100%');
+});
+
+test('明牌开关真的走到了发出去的那条消息里', async () => {
+  /*
+   * 上面 prompt.test.ts 钉的是 situationBlock 的输出,这里钉的是**整条链路**:
+   * LLMAgent 的选项 -> 实际发给模型的 payload。这个实验的全部结论都建立在
+   * "治疗组确实多看到了东西"上,靠两处代码碰巧一致是不够的。
+   */
+  const seen: string[] = [];
+  const client = mockClient(naiveResponder);
+  let firstAsk: { mateSeat: number; mateCard: string; foeCard: string } | null = null;
+  const game = createGame({
+    mode: 'team2v2', playerCount: 4, seed: 11, log: () => {},
+    makeAgent: (_p, i) => (i === 0
+      ? new LLMAgent('llm-0', {
+        client, teamHands: true, plan: false,
+        onDecision: (info) => { if (info.payload) seen.push(info.payload); },
+      })
+      : new BasicAI(`r${i}`)),
+  });
+  // 起手时抓一张队友的牌和一张敌人的牌,待会儿逐字在 payload 里找
+  const me = game.players[0];
+  const mate = game.players.find(p => p !== me && p.role === me.role)!;
+  const foe = game.players.find(p => p.role !== me.role)!;
+  firstAsk = { mateSeat: mate.seat, mateCard: cardLabel(mate.hand[0]), foeCard: cardLabel(foe.hand[0]) };
+  await game.setupAndRun();
+
+  assert.ok(seen.length > 0, '至少得问过模型一次');
+  assert.ok(seen.some(p => p.includes(`队友明牌 P${firstAsk!.mateSeat}`)),
+    `应该点名 P${firstAsk!.mateSeat}(和 P0 同队)`);
+  assert.ok(seen.some(p => p.includes(firstAsk!.mateCard)),
+    `队友起手的 ${firstAsk!.mateCard} 应该逐字出现在 payload 里`);
+  assert.ok(!seen.some(p => p.includes(`队友明牌 P${foe.seat}`)), '敌人绝不能被当队友明牌');
+});
+
+test('明牌默认关 —— 实验旋钮不能悄悄成为默认行为', async () => {
+  const seen: string[] = [];
+  const client = mockClient(naiveResponder);
+  const game = createGame({
+    mode: 'team2v2', playerCount: 4, seed: 11, log: () => {},
+    makeAgent: (_p, i) => (i === 0
+      ? new LLMAgent('llm-0', {
+        client, plan: false,
+        onDecision: (info) => { if (info.payload) seen.push(info.payload); },
+      })
+      : new BasicAI(`r${i}`)),
+  });
+  await game.setupAndRun();
+  assert.ok(seen.length > 0);
+  assert.ok(!seen.some(p => p.includes('队友明牌')));
 });

@@ -315,3 +315,85 @@ test('每次请求都带 AbortSignal', async () => {
     assert.ok(sawSignal);
   } finally { globalThis.fetch = orig; }
 });
+
+// ————————————————— 节点卡住时换模型 —————————————————
+
+/** 造一个只有一个 LLM 席位的局,直接调 decide() 看它怎么重试 */
+function mkAgent(client: any, model: string) {
+  let agent!: LLMAgent;
+  const game = createGame({
+    playerCount: 3, seed: 5, log: () => {},
+    makeAgent: (_p, i) => (i === 0
+      ? (agent = new LLMAgent('llm', { client: client as LLMClient, model }))
+      : new BasicAI(`ai${i}`)),
+  });
+  return { game, agent };
+}
+
+test('模型可以写成"主用,备用",卡住时切过去且不再切回', async () => {
+  /*
+   * 真实事故(20260821-202633):`deepseek-v4-flash-0731` 在 OpenRouter 上
+   * **只有 Baidu 一个供应商**,`sort:'throughput'` 无从选择。那个节点一卡住,
+   * 三次重试全部 73 秒超时,白等 219 秒才回落到规则 AI ——
+   * 而同一份日志里成功调用的中位数只有 2.3 秒。
+   *
+   * 拿同样的参数再撞同一个端点是没有意义的。有备胎就立刻切。
+   */
+  const seen: string[] = [];
+  const client = {
+    messages: {
+      async create(params: any) {
+        seen.push(params.model);
+        if (params.model === '主用') throw new Error('请求超时(73s 没读完响应)');
+        return {
+          content: [{ type: 'text', text: '{"thinking":"a","choice":[0]}' }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        };
+      },
+    },
+  };
+  const { game, agent } = mkAgent(client, '主用,备用');
+
+  const a = await (agent as any).decide(game, game.players[0], '问题', ['甲', '乙'], 1, 1);
+  assert.deepEqual(a, [0]);
+  assert.deepEqual(seen, ['主用', '备用'], '第一次卡住就该切,不该在主用上再撞两次');
+
+  // 切过之后不再回头 —— 每次决策都重试主用等于每次白付一个超时
+  seen.length = 0;
+  await (agent as any).decide(game, game.players[0], '问题', ['甲', '乙'], 1, 1);
+  assert.deepEqual(seen, ['备用'], '本局不该再切回主用');
+});
+
+test('没有备用模型时,连卡两次就收手,不把第三个超时也搭进去', async () => {
+  let calls = 0;
+  const client = {
+    messages: {
+      async create() { calls++; throw new Error('请求超时(73s 没读完响应)'); },
+    },
+  };
+  const { game, agent } = mkAgent(client, '只有一个');
+  const r = await (agent as any).decide(game, game.players[0], '问题', ['甲', '乙'], 1, 1);
+  assert.equal(r, null, '最终交给兜底 AI');
+  assert.equal(calls, 2, `应该只撞两次,实际 ${calls} 次`);
+});
+
+test('截断和超限仍然照旧重试,别被"卡住"那条误伤', async () => {
+  // 这两种是模型自己的问题(话太多 / 预算给大了),重试有意义,不该切模型
+  const seen: string[] = [];
+  let n = 0;
+  const client = {
+    messages: {
+      async create(params: any) {
+        seen.push(params.model);
+        if (n++ === 0) throw new Error('返回的正文为空(finish_reason=length,推理占了 2400 tokens)');
+        return {
+          content: [{ type: 'text', text: '{"thinking":"a","choice":[1]}' }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        };
+      },
+    },
+  };
+  const { game, agent } = mkAgent(client, '主用,备用');
+  assert.deepEqual(await (agent as any).decide(game, game.players[0], '问题', ['甲', '乙'], 1, 1), [1]);
+  assert.deepEqual(seen, ['主用', '主用'], '截断不是节点卡住,不该切模型');
+});

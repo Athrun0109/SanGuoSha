@@ -1069,15 +1069,30 @@ export class Game {
     return true;
   }
 
-  async selectTargets(p: Player, vc: VirtualCard): Promise<Player[] | null> {
+  /**
+   * 这张牌现在能打谁 —— **只算,不问玩家**。返回 null 表示它不需要选目标
+   * (自动指定的牌,比如无中生有、南蛮入侵)。
+   *
+   * 抽出来是给出牌菜单用的:菜单里只写"出【杀】",玩家看不到这张杀能打到谁,
+   * 而当合法目标只剩一个时 `ChoiceAgent` 会直接替他选掉 —— 于是"我想打 A"
+   * 会被无声地变成"打了 B"。见 choosePlayAction 里的注释。
+   */
+  targetOptions(p: Player, vc: VirtualCard): { min: number; max: number; cands: Player[] } | null {
     const spec = getSpec(vc.name);
-    if (spec.autoTargets) return spec.autoTargets(this, p, vc);
-    // 同上:素材里的装备已经不算数了,射程和"多打几个目标"都要按没有它来算
-    const { min, max, cands } = this.asIfGone(vc.cards, () => ({
+    if (spec.autoTargets) return null;
+    // 素材里的装备已经不算数了,射程和"多打几个目标"都要按没有它来算
+    return this.asIfGone(vc.cards, () => ({
       min: this.resolveNum(spec.targetMin, p, vc),
       max: this.resolveNum(spec.targetMax, p, vc),
       cands: this.alivePlayers.filter(t => this.canTarget(p, t, vc, [])),
     }));
+  }
+
+  async selectTargets(p: Player, vc: VirtualCard): Promise<Player[] | null> {
+    const spec = getSpec(vc.name);
+    const opts = this.targetOptions(p, vc);
+    if (!opts) return spec.autoTargets!(this, p, vc);
+    const { min, max, cands } = opts;
     if (max === 0) return [];
     if (cands.length < min) return null;
     const chosen = await this.agentOf(p).choosePlayers(

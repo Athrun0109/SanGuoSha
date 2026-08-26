@@ -137,7 +137,29 @@ ${rows.join('\n')}`;
 
 // ————————————————— L2 局面 —————————————————
 
-export function situationBlock(game: Game, self: Player, c: Codec): string {
+/**
+ * 【实验开关】队友手牌互相可见。
+ *
+ * 这是**对照实验用的旋钮,不是游戏规则** —— 目的是把"配合差"拆成两半:
+ * 有多少是*信息缺失*(看得见就补上了),有多少是*协商能力*(看得见也还是不会配合)。
+ * 它给留言功能立了个上界:明牌都不动的话,留言多半也不会动。
+ *
+ * 三条边界,每条都有测试钉着:
+ *  1. **只改提示词,不碰引擎。**所以它是 situationBlock 的参数,不是 Game 的字段 ——
+ *     从类型上就不可能影响到发牌、判定或任何裁定。
+ *  2. **只在阵营公开的模式(2v2/1v1)生效。**身份局里"谁是队友"正是要猜的东西,
+ *     按真实身份挑人明牌等于把身份表泄进提示词。
+ *  3. **必须记进日志。**改变智能体可用信息的东西一律要能在事后切开,
+ *     否则这批对局的胜率和指标就不可解释了。
+ */
+export interface SituationOpts {
+  /** 看得见队友的手牌 */
+  teamHands?: boolean;
+}
+
+export function situationBlock(
+  game: Game, self: Player, c: Codec, opts: SituationOpts = {},
+): string {
   const count = countCards(game, self);
   const lines: string[] = [`R${game.round} turn=${c.player(game.current)}`];
 
@@ -163,6 +185,15 @@ export function situationBlock(game: Game, self: Player, c: Codec): string {
 
   lines.push(`你 射程${game.attackRange(self)} 手牌上限${game.maxHand(self)}`);
   lines.push(`你的手牌 ${self.hand.map(x => c.card(x)).join(' ') || '(空)'}`);
+
+  // 队友明牌 —— 见 SituationOpts。mode.hidden 那道闸在这里,不在调用方
+  if (opts.teamHands && !game.mode.hidden) {
+    const mates = game.players.filter(p => p.alive && p !== self && p.role === self.role);
+    for (const m of mates) {
+      lines.push(`队友明牌 ${c.player(m, self)} ${m.hand.map(x => c.card(x)).join(' ') || '(空)'}`);
+    }
+    if (mates.length) lines.push('(本局你能看到队友的手牌,对方看不到你们的)');
+  }
 
   const h = hostilityBlock(game, c);
   if (h) lines.push(h);

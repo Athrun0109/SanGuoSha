@@ -17,18 +17,25 @@
 
 export const PREFLIGHT_MAX_TOKENS = 2048;
 
+import { modelChain } from './llmAgent.js';
+
 export interface PreflightResult {
   ok: boolean;
   ms: number;
   error?: string;
 }
 
-/** 探一次路。**不抛异常** —— 失败也是一种结果,调用方按 ok 分支处理 */
+/**
+ * 探一次路。**不抛异常** —— 失败也是一种结果,调用方按 ok 分支处理。
+ *
+ * `model` 可能是 `'主用,备用'` 这样的一串(见 LLMAgentOptions.model),
+ * 探路只探主用那个 —— 原样发过去的话服务端会当成一个不存在的模型名。
+ */
 export async function preflight(client: any, model: string): Promise<PreflightResult> {
   const t0 = Date.now();
   try {
     await client.messages.create({
-      model,
+      model: modelChain(model)[0] ?? model,
       max_tokens: PREFLIGHT_MAX_TOKENS,
       messages: [{ role: 'user', content: '回复 OK' }],
       output_config: { effort: 'low' },

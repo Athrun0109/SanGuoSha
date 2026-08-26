@@ -45,6 +45,16 @@ export interface LLMClient {
 
 export interface LLMAgentOptions {
   client: LLMClient;
+  /**
+   * 模型。可以写成**逗号分隔的一串**:主用 + 备用,主用卡住时自动切过去。
+   *
+   *   'deepseek/deepseek-v4-flash-0731,deepseek/deepseek-v4-flash'
+   *
+   * 为什么需要备用:OpenRouter 上有些模型**只有一个供应商**(0731 目前只有 Baidu),
+   * 那个节点卡住时 `sort:'throughput'` 无从选择,重试多少次都是撞同一堵墙。
+   * 换模型是唯一的出路。注意不同快照的行为可能有差别,别拿备用模型的对局
+   * 去和主用模型的数据混着比。
+   */
   model?: string;
   /** 思考深度。决策频繁、要求响应快,默认 low */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -72,6 +82,12 @@ export interface LLMAgentOptions {
    * 关掉就是每一步都单独问一遍模型 —— 慢,但行为最容易预测。
    */
   plan?: boolean;
+  /**
+   * 【实验开关】能看到队友的手牌。见 rulesPrompt.ts 的 SituationOpts ——
+   * 那是个对照实验用的旋钮,默认关,而且只在阵营公开的模式下生效。
+   * 开了必须记进对局日志,否则这局的数据事后切不开。
+   */
+  teamHands?: boolean;
   fallback?: Agent;
   onDecision?: (info: DecisionInfo) => void;
 }
@@ -100,6 +116,8 @@ export interface DecisionInfo {
     usage?: Record<string, number>;
     /** 实际服务的供应商 —— 同一个模型不同节点能差好几倍,不记下来就查不出来 */
     provider?: string;
+    /** 这次用的是哪个模型 —— 主用卡住时会切备用,不记下来就对不上账 */
+    model?: string;
   }>;
 
   /** 这一步是从计划里兑现的,没发请求 */
@@ -125,6 +143,28 @@ const TRUNCATED_ERROR = /finish_reason=length|没有文本内容/i;
  * 只在排除了截断之后才判这条 —— 我们自己的截断消息里也带 "max_tokens" 三个字。
  */
 const OVERSIZE_ERROR = /max_tokens|max_completion_tokens|output token/i;
+
+/**
+ * **节点卡住**类的错误 —— 请求根本没回来,和模型本身说了什么无关。
+ *
+ * 和上面几种要分开处理:截断是"话太多",超限是"预算给大了",这两种重试有意义;
+ * 而节点卡住时,拿同样的参数再撞同一个端点几乎必然再卡一次。
+ *
+ * 实测(20260821-202633):`deepseek-v4-flash-0731` 在 OpenRouter 上**只有 Baidu
+ * 一个供应商**,`sort:'throughput'` 无从选择。它一卡住,三次重试全部 73 秒超时,
+ * 白等 219 秒才回落到规则 AI。同一份日志里成功调用的中位数只有 2.3 秒。
+ *
+ * **只认我们自己的超时,不认 socket hang up / ECONNRESET / 5xx。** 后面这些是
+ * *瞬间*失败,重试既便宜又常常成功;把它们也算成"节点卡住"会误伤 ——
+ * 加这条规则时就先把「两次连接抖动后第三次成功」那条测试打挂了一次。
+ * 判据是**这次失败贵不贵**,而"请求超时"这句话只可能来自客户端等满整个超时。
+ */
+const STALL_ERROR = /请求超时/;
+
+/** `'主用,备用1,备用2'` -> 模型链。空串和多余空格都容忍 */
+export function modelChain(spec: string): string[] {
+  return spec.split(',').map(x => x.trim()).filter(Boolean);
+}
 /** 截断重试的封顶。再高也没有模型吐得出来,只会白撞一次拒绝 */
 const MAX_BUDGET = 65536;
 
@@ -155,6 +195,17 @@ export class LLMAgent extends ChoiceAgent {
   readonly id: string;
 
   private o: Required<Omit<LLMAgentOptions, 'client' | 'fallback' | 'onDecision'>>;
+
+  /**
+   * 模型链:主用在前。节点卡住时往后切,**切了就不再切回来** ——
+   * 每次决策都重新试一遍主用,等于每次都白付一个超时(实测 73 秒)。
+   * 想换回去重开一局就行,日志里会写明什么时候切的。
+   */
+  private models: string[];
+  private modelIdx = 0;
+  private get model(): string { return this.models[this.modelIdx]; }
+  /** 连着卡了几次(没有备胎可切时用来提前收手) */
+  private stalls = 0;
   private client: LLMClient;
   protected fallback: Agent;
   protected codecMode: CodecMode;
@@ -182,6 +233,8 @@ export class LLMAgent extends ChoiceAgent {
     this.client = opts.client;
     this.fallback = opts.fallback ?? new BasicAI(`${id}-fallback`);
     this.onDecision = opts.onDecision;
+    // 'a,b,c' -> ['a','b','c']:主用在前,后面是卡住时的备胎
+    this.models = modelChain(opts.model ?? 'claude-opus-5');
     this.o = {
       model: opts.model ?? 'claude-opus-5',
       effort: opts.effort ?? 'low',
@@ -190,6 +243,7 @@ export class LLMAgent extends ChoiceAgent {
       historyRounds: opts.historyRounds ?? 10,
       maxLogLines: opts.maxLogLines ?? 40,
       maxLogChars: opts.maxLogChars ?? 350,
+      teamHands: opts.teamHands ?? false,      // 实验开关,默认关
       selfNotes: opts.selfNotes ?? 4,
       plan: opts.plan ?? true,
     };
@@ -244,7 +298,7 @@ export class LLMAgent extends ChoiceAgent {
     // 只有出牌阶段才谈得上"接下来几步"
     const wantPlan = this.o.plan && isPlayAction(question);
 
-    const parts = [situationBlock(game, self, c)];
+    const parts = [situationBlock(game, self, c, { teamHands: this.o.teamHands })];
     const ev = eventsBlock(this.recentLog(game), c, this.o.maxLogChars);
     if (ev) parts.push(ev);
     const bl = this.beliefs.render(game, self, c);
@@ -272,7 +326,7 @@ export class LLMAgent extends ChoiceAgent {
       const usedBudget = budget;
       try {
         const res = await this.client.messages.create({
-          model: this.o.model,
+          model: this.model,
           max_tokens: budget,
           system,
           messages,
@@ -297,7 +351,11 @@ export class LLMAgent extends ChoiceAgent {
         const text = res.content.find(b => b.type === 'text')?.text;
         // 原始文本要在解析之前留住:解析失败时,这段就是唯一能看出模型到底说了啥的东西
         if (text) rawText = text;
-        attempts.push({ n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget, usage, provider: res.provider });
+        this.stalls = 0;
+        attempts.push({
+          n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget,
+          usage, provider: res.provider, model: this.model,
+        });
         if (!text) throw new Error('响应中没有文本内容');
         const parsed = extractJson(text);
         thinking = String(parsed.thinking ?? '');
@@ -317,9 +375,31 @@ export class LLMAgent extends ChoiceAgent {
         // 请求本身就没发出去时这条尚未入账,补一条;已入账的直接把错误挂上去
         const rec = attempts[attempts.length - 1];
         if (rec && rec.n === attempt + 1) rec.error = lastErr;
-        else attempts.push({ n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget, error: lastErr });
+        else attempts.push({
+          n: attempt + 1, ms: Date.now() - t0, maxTokens: usedBudget,
+          error: lastErr, model: this.model,
+        });
         // 凭据/模型名这类错误重试多少次都一样,直接放弃
         if (PERMANENT_ERROR.test(lastErr)) break;
+        /*
+         * **节点卡住:换模型,换不了就早点收手。**
+         *
+         * 拿同样的参数再撞同一个端点几乎必然再卡一次 —— 实测三次重试全部 73 秒
+         * 超时,白等 219 秒。有备胎就立刻切过去(那一次重试才有意义);
+         * 没有备胎就只再试一次,别把第三个 73 秒也搭进去。
+         */
+        if (STALL_ERROR.test(lastErr)) {
+          this.stalls++;
+          if (this.modelIdx + 1 < this.models.length) {
+            const from = this.model;
+            this.modelIdx++;
+            this.stalls = 0;
+            game.log(`  ※ ${this.id} ${from} 无响应,切用备用模型 ${this.model}(本局不再切回)`);
+          } else if (this.stalls >= 2) {
+            game.log(`  ※ ${this.id} ${this.model} 连续无响应,且没有备用模型,本次交给规则 AI`);
+            break;
+          }
+        }
         // 正文被推理 token 挤空了 —— 加大预算再来一次,这是最常见的一种失败
         if (TRUNCATED_ERROR.test(lastErr)) budget = Math.min(budget * 2, MAX_BUDGET);
         // 预算超出了这个模型的输出上限:往回退。跟着翻倍只会再撞一次同样的拒绝,

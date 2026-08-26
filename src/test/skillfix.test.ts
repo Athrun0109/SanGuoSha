@@ -788,3 +788,55 @@ test('激将没人响应时:什么都没发生,次数不消耗', async () => {
   assert.equal(victim.hp, victim.maxHp);
   assert.equal(jijiang.canUse(game, liu), true, '还能再来一次(换个目标)');
 });
+
+// ————————————————— 出牌菜单要写清"这张牌只能打谁" —————————————————
+
+test('目标唯一时,出牌菜单里要写明是谁', async () => {
+  /*
+   * 真实事故(20260821-202633,2v2 局):赵云装着诸葛连弩,想打对面 1 血的诸葛亮,
+   * 推理原文是「我射程1正好够到P0,先出杀打P0…先解决P0最关键」。
+   * 但诸葛亮手牌为 0、**空城**成立,不能成为【杀】的目标;关羽距离 2 够不着 ——
+   * 唯一合法目标是**队友周瑜**。
+   *
+   * 而"只有一个合法解就直接选掉"那条捷径把选目标那道题跳过了:模型根本没被问,
+   * 也就无从知道意图落空。它连着两张【杀】打在队友身上,第二张还是按它自己那份
+   * "若被救回再补刀"的计划打的 —— 计划是在"目标是 P0"的前提下写的。
+   *
+   * 这不是判断失误,是**信息在选动作那一刻不可见**。菜单必须自己说出来。
+   */
+  const { game } = mkGame({ 0: '诸葛亮', 1: '赵云', 2: '周瑜' });
+  const { ChoiceAgent } = await import('../ai/choiceAgent.js');
+  let seen: string[] = [];
+  class Probe extends ChoiceAgent {
+    readonly id = 'probe';
+    protected codecMode = 'verbose' as const;
+    protected fallback = { } as any;
+    protected async decide(_g: any, _s: any, _q: string, options: string[]): Promise<number[]> {
+      seen = options;
+      return [options.length - 1];        // 一律收手,免得真打起来
+    }
+  }
+  const [kong, zhao, yu] = game.players;
+  give(game, zhao, '杀', '♦', 8);
+  game.current = zhao;
+
+  // 诸葛亮手牌为 0 -> 空城 -> 不能被【杀】指定,于是只剩周瑜一个合法目标
+  assert.equal(kong.hand.length, 0);
+  const probe = new Probe();
+  game.agentOf = (() => probe) as any;
+  await (game as any).playPhase(zhao);
+
+  const slash = seen.find(o => o.includes('杀'));
+  assert.ok(slash, `菜单里应该有那张杀,实际:${seen.join(' | ')}`);
+  assert.match(slash!, /只能指定/, '目标唯一时必须在菜单里就说清楚是谁');
+  assert.match(slash!, /周瑜/, '要点名是周瑜,而不是它以为的诸葛亮');
+
+  // 目标不止一个的时候别加噪声 —— 那种情况玩家本来就会被问到
+  give(game, kong, '闪');                  // 诸葛亮有手牌了,空城失效
+  seen = [];
+  give(game, zhao, '杀', '♣', 4);
+  await (game as any).playPhase(zhao);
+  const slash2 = seen.find(o => o.includes('杀'));
+  assert.ok(slash2);
+  assert.doesNotMatch(slash2!, /只能指定/, '有两个目标可选就不该加后缀');
+});

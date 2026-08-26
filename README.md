@@ -510,6 +510,26 @@ npm run duel -- --provider=openrouter    # 强制后端(一般用不到,靠模�
 
 `--effort` 在两个后端上都有效:Anthropic 支持 `low/medium/high/xhigh/max`,OpenRouter 只有三档,`xhigh`/`max` 会收敛到 `high`。
 
+### 备用模型:`--model` 可以写成一串
+
+```bash
+npm run duel -- --model=deepseek/deepseek-v4-flash-0731,deepseek/deepseek-v4-flash
+```
+
+逗号分隔,**主用在前**。主用节点卡住(我们自己的超时)时自动切到下一个,**本局不再切回**。
+网页设置页的模型输入框同样支持这种写法。
+
+为什么需要它:OpenRouter 上有些模型**只有一个供应商** —— `deepseek-v4-flash-0731`
+目前只有 Baidu 一家,`sort:'throughput'` 无从选择。那个节点一卡住,重试多少次都是撞同一堵墙
+(实测三次重试全部 73 秒超时,白等 219 秒才回落到规则 AI,而同一份日志里成功调用的中位数只有 2.3 秒)。
+**换模型是唯一的出路**,换节点没有节点可换。
+
+想知道某个模型有几家供应商,跑完一局用 `npm run metrics` 或直接看 jsonl 里 `attempts[].provider`
+那一列 —— 只有一个值就说明是单点。
+
+注意不同快照的行为可能有差别(`-0731` 和不带后缀的 `deepseek-v4-flash` 是两个不同的快照),
+**别把备用模型跑出来的对局和主用模型的数据混着比**。
+
 ### 换后端为什么不用改 agent
 
 `LLMAgent` 依赖的只是一个很小的接口(`messages.create`),所以接一个新后端 = 写一个实现该接口的客户端。提示词分层、滚动战报、记牌器、代号化、兜底逻辑全部照旧。
