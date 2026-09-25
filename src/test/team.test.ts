@@ -205,3 +205,54 @@ test('MCP 的 humanSeat 真的开了人类座位', async () => {
   assert.equal(s.game.ally(s.game.players[0], s.game.players[3]), true,
     '0 和 3 号位同队 —— 这正是"人和 AI 当队友"的坐法');
 });
+
+// ————————————————— 圆桌座次和回合顺序是两件事 —————————————————
+
+test('2v2:回合顺序仍是甲乙乙甲,但圆桌上每个人的邻座都是敌人', () => {
+  /*
+   * 三国杀把两件事绑在同一个圈上,而 2v2 里它们要的排布正好冲突:
+   *   回合顺序要「甲乙乙甲」—— 否则先手方凭空多 17 个百分点(实测 58.6% vs 41.4%)
+   *   距离要「甲乙甲乙」—— 否则两个敌人一个在距离 1、一个在距离 2,
+   *                       默认射程 1 够不着第二个,集火在结构上就不可能
+   * 拆开之后两个都成立。
+   */
+  const game = mk();
+  const [p0, p1, p2, p3] = game.players;
+  assert.deepEqual(game.players.map(p => p.role), ['blue', 'red', 'red', 'blue'],
+    '数组顺序 = 回合顺序,仍然是甲乙乙甲');
+
+  // 圆桌是 0-1-3-2:每个人的两个邻座都是对手
+  for (const me of game.players) {
+    const foes = game.players.filter(q => q !== me && q.role !== me.role);
+    for (const f of foes) {
+      assert.equal(game.distance(me, f), 1,
+        `${me.seat} 号位到对手 ${f.seat} 号位应该是 1,实际 ${game.distance(me, f)}`);
+    }
+    const mate = game.players.find(q => q !== me && q.role === me.role)!;
+    assert.equal(game.distance(me, mate), 2,
+      `队友该在距离 2 —— 这样默认射程就打不到自己人`);
+  }
+
+  // 这条才是真正的收获:裸装状态下,【杀】够得着两个敌人、够不着队友
+  for (const me of game.players) {
+    assert.equal(game.attackRange(me), 1);
+    const reach = game.players.filter(q => q !== me && game.inAttackRange(me, q));
+    assert.equal(reach.length, 2, '射程内正好是两个敌人');
+    assert.ok(reach.every(q => q.role !== me.role), '队友不在射程内');
+  }
+  void [p0, p1, p2, p3];
+});
+
+test('2v2:死一个人之后圆桌收缩,剩下三人两两相邻', () => {
+  // distance 是按**存活**的人算的 —— 换了圆桌顺序也不能把这条弄丢
+  const game = mk();
+  const dead = game.players[1];
+  dead.alive = false;
+  const rest = game.players.filter(p => p.alive);
+  for (const a of rest) {
+    for (const b of rest) {
+      if (a === b) continue;
+      assert.equal(game.distance(a, b), 1, '三个人围一圈,彼此都是邻座');
+    }
+  }
+});

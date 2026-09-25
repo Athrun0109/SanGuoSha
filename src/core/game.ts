@@ -186,7 +186,12 @@ export class Game {
 
   distance(a: Player, b: Player): number {
     if (a === b) return 0;
-    const alive = this.alivePlayers;
+    // 圆桌座次可以和数组顺序(=回合顺序)不一样,见 GameMode.ring。
+    // 死人照旧从圈里拿掉 —— 人少了大家自然就近了
+    const ring = this.mode.ring?.(this.players.length);
+    const alive = ring
+      ? ring.map(s => this.players[s]).filter(p => p.alive)
+      : this.alivePlayers;
     const ia = alive.indexOf(a), ib = alive.indexOf(b);
     if (ia < 0 || ib < 0) return Infinity;
     const n = alive.length;

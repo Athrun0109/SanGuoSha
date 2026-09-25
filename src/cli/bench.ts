@@ -39,6 +39,7 @@ import { LLMAgent } from '../ai/llmAgent.js';
 import { preflight } from '../ai/preflight.js';
 import { Recorder } from '../log/recorder.js';
 import type { Agent } from '../core/agent.js';
+import type { TeamHandsView } from '../ai/rulesPrompt.js';
 
 function flag(name: string): string | undefined {
   const hit = process.argv.find(a => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -78,7 +79,8 @@ async function main() {
     .map(x => Number(x.trim())).filter(x => Number.isInteger(x) && x >= 0 && x < n));
   const out = path.resolve(flag('out') ?? `logs/bench-${effort}`);
   /**
-   * `--open-hand` 开明牌对照实验:**一队看得见彼此手牌,另一队照旧,同一局里对打。**
+   * `--open-hand=tail|inline|ask` 开明牌对照实验:
+   * **一队看得见彼此手牌,另一队照旧,同一局里对打。**取值决定手牌摆在提示词的哪里。
    *
    * 上一批 A/B 的结构性缺陷是两队完全对称,所以胜率什么都测不出来,只能看行为指标。
    * 这次治疗组和对照组在同一局里,胜率就是直接的效果测量,而且天然配对 ——
@@ -87,7 +89,20 @@ async function main() {
    * 治疗的队伍**按 seed 奇偶交替**:即使 ABBA 座次还残留一点先手偏差,
    * 也会被完全抵消,不必再另跑一组空白对照。
    */
-  const openHand = flag('open-hand') !== undefined;
+  /**
+   * `--hive` 蜂群组:**一队由同一个模型实例操控两个席位**,另一队照旧各打各的。
+   *
+   * 这一组量的是协同的**上界** —— 信息完全共享、意图天然一致、不需要任何沟通。
+   * 明牌、留言这些"半协同"手段最多也就能捞回上界和单打独斗之间的差;
+   * 不知道天花板在哪,就没法判断某个手段"没效果"是它不行,还是本来就没多少可捞。
+   * 和 --open-hand 一样按 seed 奇偶交替治疗,消掉残余的先后手偏差。
+   */
+  const hive = flag('hive') !== undefined;
+  const openHand = (flag('open-hand') || 'off') as TeamHandsView;
+  if (!(['off', 'tail', 'inline', 'ask'] as string[]).includes(openHand)) {
+    console.error(`--open-hand 只能是 tail / inline / ask(见 rulesPrompt.ts 的 TeamHandsView)`);
+    process.exit(1);
+  }
 
   if (!llmSeats.size) { console.error('--llm 至少要有一个合法席位'); process.exit(1); }
 
@@ -119,16 +134,33 @@ async function main() {
     const recHook = rec.llmHook();
     const llms: LLMAgent[] = [];
     const roleOf = new Map<number, string>();
+    // 蜂群组每队**共用一个实例**,所以按队伍缓存
+    const hiveBrain = new Map<string, LLMAgent>();
     try {
       const game = createGame({
         mode: modeName, playerCount: n, seed,
         log: rec.logFn(),
-        makeAgent: (p, i): Agent => {
+        makeAgent: (p, i, all): Agent => {
           if (!llmSeats.has(i)) return rec.wrap(new BasicAI(`rule-${i}`));
           roleOf.set(i, p.role);
+          const mine = treated(seed, p.role);
+          if (hive && mine) {
+            // 同队的第二个席位复用第一个建好的实例 —— 那才是"一个脑子"
+            const got = hiveBrain.get(p.role);
+            if (got) return rec.wrap(got);
+            const seats = all.filter(q => q.role === p.role && llmSeats.has(q.seat))
+              .map(q => q.seat);
+            const brain = new LLMAgent(`llm-${p.role}`, {
+              client, model, effort, codec, historyRounds,
+              hiveSeats: seats, onDecision: recHook,
+            });
+            hiveBrain.set(p.role, brain);
+            llms.push(brain);
+            return rec.wrap(brain);
+          }
           const a = new LLMAgent(`llm-${i}`, {
             client, model, effort, codec, historyRounds,
-            teamHands: openHand && treated(seed, p.role),
+            teamHands: mine ? openHand : 'off',
             onDecision: recHook,
           });
           llms.push(a);
@@ -138,14 +170,17 @@ async function main() {
       rec.bind(game);
       rec.start({
         seed, model, effort, codec, historyRounds, playerCount: n, mode: modeName,
-        openHand,
+        openHand, hive,
         /*
          * metrics 靠这个把席位分组。明牌实验里治疗组标成 llm+open ——
          * 于是 pool() 直接给出两行,同一批对局里就能并排比,不需要跑两次。
          */
+        // 治疗组带上写法名(llm+ask 之类),几种写法的日志混在一起也能分开统计
         seats: Array.from({ length: n }, (_, i) => ({
           control: !llmSeats.has(i) ? 'rule'
-            : openHand && treated(seed, roleOf.get(i)!) ? 'llm+open' : 'llm',
+            : !treated(seed, roleOf.get(i)!) ? 'llm'
+              : hive ? 'llm+hive'
+                : openHand !== 'off' ? `llm+${openHand}` : 'llm',
         })),
       });
       const res = await game.setupAndRun();

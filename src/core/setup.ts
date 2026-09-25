@@ -17,8 +17,13 @@ export interface SetupOptions extends Omit<GameOptions, 'mode'> {
    * 决定身份怎么分、有没有主公加血、谁先手、怎么算赢 —— 见 core/mode.ts
    */
   mode?: GameMode | string;
-  /** 座位 -> agent 工厂 */
-  makeAgent: (p: Player, index: number) => Agent;
+  /**
+   * 座位 -> agent 工厂。
+   *
+   * 第三个参数是**整桌人**(全部建好之后才调用),因为有的 agent 需要在建的时候
+   * 就知道队友是谁 —— 比如蜂群实验里同一个实例要同时接管一整队。
+   */
+  makeAgent: (p: Player, index: number, all: Player[]) => Agent;
   /** 手动点将:座位 -> 武将名,如 { 0: '刘备', 3: '吕布' }。没指定的座位随机 */
   fixedGenerals?: Record<number, string>;
   /**
@@ -195,8 +200,12 @@ export function createGame(opts: SetupOptions): Game {
     if (mode.revealed(p.role)) p.revealed = true;
 
     game.players.push(p);
-    game.agents.set(p, opts.makeAgent(p, i));
   }
+
+  // agent 单独一轮建 —— 工厂要能看到整桌人(见 makeAgent 的注释)
+  game.players.forEach((p, i) => {
+    game.agents.set(p, opts.makeAgent(p, i, game.players));
+  });
 
   // 牌堆
   game.deck = rng.shuffle(buildDeck());

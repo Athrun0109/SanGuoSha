@@ -288,7 +288,7 @@ test('明牌开关真的走到了发出去的那条消息里', async () => {
     mode: 'team2v2', playerCount: 4, seed: 11, log: () => {},
     makeAgent: (_p, i) => (i === 0
       ? new LLMAgent('llm-0', {
-        client, teamHands: true, plan: false,
+        client, teamHands: 'tail', plan: false,
         onDecision: (info) => { if (info.payload) seen.push(info.payload); },
       })
       : new BasicAI(`r${i}`)),
@@ -308,6 +308,39 @@ test('明牌开关真的走到了发出去的那条消息里', async () => {
   assert.ok(!seen.some(p => p.includes(`队友明牌 P${foe.seat}`)), '敌人绝不能被当队友明牌');
 });
 
+test('ask 写法真的贴在题面前面 —— 空结果的前提是它确实送到了', async () => {
+  /*
+   * 三种写法跑下来引用率全是 0。这种"什么都没发生"的结果最危险的失败方式是
+   * **treatment 根本没生效**,而那看起来和"生效了但没用"一模一样。
+   * 所以除了内容要在,**位置**也要钉住:ask 的全部假设就是"离问题越近注意力越高",
+   * 如果它被排在战报后面、题面前面之外的任何地方,这一版探的就不是它想探的东西。
+   */
+  const seen: string[] = [];
+  const client = mockClient(naiveResponder);
+  const game = createGame({
+    mode: 'team2v2', playerCount: 4, seed: 11, log: () => {},
+    makeAgent: (_p, i) => (i === 0
+      ? new LLMAgent('llm-0', {
+        client, teamHands: 'ask', plan: false,
+        onDecision: (info) => { if (info.payload) seen.push(info.payload); },
+      })
+      : new BasicAI(`r${i}`)),
+  });
+  await game.setupAndRun();
+
+  const hit = seen.filter(p => p.includes('这会改变你接下来的选择吗'));
+  assert.ok(hit.length > 0, 'ask 那句必须出现在实际发出去的消息里');
+  for (const p of hit) {
+    const ask = p.indexOf('这会改变你接下来的选择吗');
+    const q = p.indexOf('出牌阶段,选一个动作');
+    if (q < 0) continue;
+    assert.ok(ask < q, 'ask 必须排在题面**之前**');
+    assert.ok(q - ask < 200, `ask 和题面之间不该隔着别的段落(隔了 ${q - ask} 字)`);
+  }
+  // 而且局势块里不该再重复一份
+  assert.ok(!seen.some(p => p.includes('队友明牌')), 'ask 写法下不该同时出现 tail 那几行');
+});
+
 test('明牌默认关 —— 实验旋钮不能悄悄成为默认行为', async () => {
   const seen: string[] = [];
   const client = mockClient(naiveResponder);
@@ -323,4 +356,65 @@ test('明牌默认关 —— 实验旋钮不能悄悄成为默认行为', async 
   await game.setupAndRun();
   assert.ok(seen.length > 0);
   assert.ok(!seen.some(p => p.includes('队友明牌')));
+});
+
+test('蜂群:一个实例接管两个席位,身份块要覆盖两个人', async () => {
+  /*
+   * 最容易悄悄搞错的是 L1:它带着 cache_control、**只建一次**。
+   * 按"第一个来问的那个人"建的话,轮到另一个席位时身份就是错的,而且还被缓存着 ——
+   * 模型会一直以为自己是另一个人,整组数据作废而且看不出来。
+   */
+  const seen: string[] = [];
+  const client = mockClient(naiveResponder);
+  let brain: LLMAgent | null = null;
+  const game = createGame({
+    mode: 'team2v2', playerCount: 4, seed: 11, log: () => {},
+    makeAgent: (p, _i, all) => {
+      if (p.role !== game0Role()) return new BasicAI('r');
+      if (!brain) {
+        brain = new LLMAgent('llm-hive', {
+          client, plan: false,
+          hiveSeats: all.filter(q => q.role === p.role).map(q => q.seat),
+          onDecision: (info) => { if (info.payload) seen.push(info.payload); },
+        });
+      }
+      return brain;
+    },
+  });
+  function game0Role() { return 'blue'; }
+  const mine = game.players.filter(p => p.role === 'blue');
+  assert.equal(mine.length, 2);
+  await game.setupAndRun();
+
+  const sys = (client.calls[0].system as any[]).map(x => x.text).join('\n');
+  for (const p of mine) {
+    assert.ok(sys.includes(`P${p.seat}`), `身份块要点名 P${p.seat}`);
+  }
+  assert.match(sys, /同时操控/, '要说清它操控的是两个人,不是一个');
+
+  // 每次决策都要写明这回替谁做决定,否则两只手会混
+  assert.ok(seen.length > 1);
+  for (const p of mine) {
+    assert.ok(seen.some(x => x.includes(`本次要你替 P${p.seat}`)),
+      `应该出现过"替 P${p.seat} 做决定"`);
+  }
+  // 两个席位的手牌都要看得见 —— 那本来就是同一个人的两只手
+  assert.ok(seen.some(x => x.includes('你操控的 P')), '另一只手的手牌要摆出来');
+});
+
+test('蜂群:计划按席位分开,不会拿 A 的计划去答 B 的题', async () => {
+  /*
+   * 一份计划钉着某个人的手牌 id 和体力。共用一个 PlanRunner 的话,
+   * P0 的计划轮到 P3 时会被拿去核对 —— 手牌对不上就判"计划外"作废,
+   * 不会出错但会把计划命中率打到 0,白烧一堆请求。
+   */
+  const { PlanRunner } = await import('../ai/plan.js');
+  const client = mockClient(naiveResponder);
+  const agent = new LLMAgent('llm-hive', { client, hiveSeats: [0, 3] });
+  const seat = (n: number) => ({ seat: n } as any);
+  const a = (agent as any).plannerOf(seat(0));
+  const b = (agent as any).plannerOf(seat(3));
+  assert.ok(a instanceof PlanRunner);
+  assert.notEqual(a, b, '两个席位必须各有一份计划');
+  assert.equal(a, (agent as any).plannerOf(seat(0)), '同一个席位要拿到同一份');
 });

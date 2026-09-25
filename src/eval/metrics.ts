@@ -367,7 +367,13 @@ export function metricsOfLog(file: string): Map<number, SeatMetrics> {
   // ——— LLM 成本 ———
   for (const r of rows) {
     if (r.type !== 'llm') continue;
-    const n = Number(String(r.agentId).match(/(\d+)$/)?.[1]);
+    /*
+     * 优先用显式的 seat 字段。尾号解析只是为了读得懂旧日志 ——
+     * 蜂群的 agentId 是 `llm-blue`,没有尾号,靠猜的话整组决策会静默丢失。
+     */
+    const n = typeof r.seat === 'number'
+      ? r.seat
+      : Number(String(r.agentId).match(/(\d+)$/)?.[1]);
     if (!Number.isInteger(n)) continue;
     const m = seat(n);
     m.llmCalls++;

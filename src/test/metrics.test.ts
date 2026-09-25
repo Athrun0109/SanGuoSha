@@ -267,6 +267,28 @@ test('身份局:内奸没有队友,不进集火统计', () => {
   assert.equal(m.get(3)!.coAttacks, 0, '内奸的目标和谁都不一致,算集火没有意义');
 });
 
+test('蜂群:一个 agent 服务两个席位,决策要按 seat 字段归位', () => {
+  /*
+   * 蜂群的 agentId 是 `llm-blue` 这种没有尾号的。靠尾号反推席位的话,
+   * 整组决策会**静默地**落不到任何席位上 —— 统计不报错,只显示成
+   * "这一组没有 LLM 调用",而那看起来就像实验没跑起来。
+   */
+  const file = writeLog([
+    { type: 'meta', seats: [{ control: 'llm+hive' }, { control: 'llm' }, { control: 'llm' }, { control: 'llm+hive' }] },
+    teams2v2, snap(1, 0, [1, 1, 1, 1]),
+    { type: 'llm', agentId: 'llm-blue', seat: 0, attempts: [{ ms: 1000 }] },
+    { type: 'llm', agentId: 'llm-blue', seat: 3, attempts: [{ ms: 1000 }] },
+    { type: 'llm', agentId: 'llm-blue', seat: 3, fromPlan: true },
+    // 老日志没有 seat 字段,还得能按尾号读
+    { type: 'llm', agentId: 'llm-1', attempts: [{ ms: 500 }] },
+  ]);
+  const m = metricsOfLog(file);
+  assert.equal(m.get(0)!.llmCalls, 1);
+  assert.equal(m.get(3)!.llmCalls, 2, '同一个实例替 P3 做的决定要记到 P3 头上');
+  assert.equal(m.get(3)!.fromPlan, 1);
+  assert.equal(m.get(1)!.llmCalls, 1, '旧格式(靠 agentId 尾号)要继续读得懂');
+});
+
 test('归并:按"控制方式/武将"合,不按座位号', () => {
   // 换一局座位就变了,按座位号归并会把不同的人混在一起
   const a = new Map([[0, { ...blank(), general: '甘宁', control: 'llm', turns: 2, handStart: [3] }]]);

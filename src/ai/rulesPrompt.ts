@@ -117,13 +117,35 @@ function stakes(game: Game, self: Player, c0: (p: Player) => string): string {
   }
 }
 
-export function identityBlock(game: Game, self: Player, c: Codec): string {
+/**
+ * @param hive 这个 agent 同时操控的**全部**席位(蜂群实验用)。
+ *   给了就说明"你是这几个人",而不是"你是某一个人"。
+ */
+export function identityBlock(
+  game: Game, self: Player, c: Codec, hive?: Player[],
+): string {
   const rows = game.players.map(p => {
     const who = p === self ? `${c.player(p)} 你` : c.player(p);
     const g = c.mode === 'verbose' ? ` ${p.general.name}` : '';
     const sex = p.gender === 'male' ? '男' : '女';
     return `${who}${g} ${p.kingdom} ${sex} hp上限${p.maxHp}\n  技能 ${c.skills(p)}`;
   });
+  if (hive && hive.length > 1) {
+    /*
+     * 蜂群:同一个模型实例操控整队,于是"队友"这个概念消失了 —— 那两只手都是你的。
+     * 这是协同的**上界**:信息完全共享、意图天然一致,不需要任何沟通手段。
+     * 有了这个上界才知道明牌/留言那些"半协同"手段最多能捞回多少。
+     */
+    const who = hive.map(p => c.player(p)).join(' 和 ');
+    return `本局 ${game.players.length} 人(${game.mode.label})。
+**你同时操控 ${who}(${ROLE_NAME[hive[0].role]})** —— 这两个人都是你,他们的手牌你都看得见。
+每次只问你其中一个人的一个决策,题面会写明现在轮到谁。
+两个人的行动可以直接配套,不需要猜对方想干什么。
+${stakes(game, hive[0], p => c.player(p))}
+
+${rows.join('\n')}`;
+  }
+
   const hidden = game.mode.hidden;
   const head = hidden
     ? `你是 ${c.player(self)},身份 ${self.role}(${ROLE_NAME[self.role]}),只有你自己知道。
@@ -138,29 +160,64 @@ ${rows.join('\n')}`;
 // ————————————————— L2 局面 —————————————————
 
 /**
- * 【实验开关】队友手牌互相可见。
+ * 【实验开关】队友手牌互相可见 —— 摆进提示词的哪里、写成什么样。
  *
- * 这是**对照实验用的旋钮,不是游戏规则** —— 目的是把"配合差"拆成两半:
- * 有多少是*信息缺失*(看得见就补上了),有多少是*协商能力*(看得见也还是不会配合)。
- * 它给留言功能立了个上界:明牌都不动的话,留言多半也不会动。
- *
- * 三条边界,每条都有测试钉着:
- *  1. **只改提示词,不碰引擎。**所以它是 situationBlock 的参数,不是 Game 的字段 ——
+ * 这是**对照实验用的旋钮,不是游戏规则**,三条边界各有测试钉着:
+ *  1. **只改提示词,不碰引擎。**所以它是 situationBlock 的参数、不是 Game 的字段 ——
  *     从类型上就不可能影响到发牌、判定或任何裁定。
- *  2. **只在阵营公开的模式(2v2/1v1)生效。**身份局里"谁是队友"正是要猜的东西,
- *     按真实身份挑人明牌等于把身份表泄进提示词。
- *  3. **必须记进日志。**改变智能体可用信息的东西一律要能在事后切开,
- *     否则这批对局的胜率和指标就不可解释了。
+ *  2. **只在阵营公开的模式(2v2/1v1)生效**(闸在 visibleMates 里)。身份局里
+ *     "谁是队友"正是要猜的东西,按真实身份挑人明牌等于把身份表泄进提示词。
+ *  3. **必须记进日志。**改变智能体可用信息的东西一律要能在事后切开。
+ *
+ * 60 局明牌实验的结论是**模型根本没读**:3094 条推理里逐字引用队友暗牌只有 2 条,
+ * 和看不见的对照组(0 条)几乎没差别。所以下一个要分离的变量不是"给不给信息",
+ * 而是**怎么给**。三种写法各跑一批,只看"引用率"动没动 —— 这个指标按决策算,
+ * 四局就够,不必再花 60 局的钱去测结果指标。
+ *
+ *   off     不给(对照)
+ *   tail    局势块末尾的独立几行 —— 上一轮用的写法,当校准基线
+ *   inline  并进角色表那一行,和 hp/手牌数并排 —— 只改位置
+ *   ask     摆在题面正前方,并且写成一个问句 —— 位置和形式一起改
+ *
+ * `ask` 同时动了两个变量,不是干净的正交设计。这是有意的:先用最强的一版
+ * 探出"注意力到底能不能被拉过来",能拉动再回头拆是位置的功劳还是问句的功劳。
  */
+export type TeamHandsView = 'off' | 'tail' | 'inline' | 'ask';
+
 export interface SituationOpts {
-  /** 看得见队友的手牌 */
-  teamHands?: boolean;
+  /** 看得见队友的手牌,以及怎么摆 */
+  teamHands?: TeamHandsView;
+  /**
+   * 蜂群:这个 agent 同时操控的全部席位。
+   * 和 teamHands 不是一回事 —— 那是"看得见别人的牌",这是"那也是你的牌"。
+   */
+  hive?: Player[];
+}
+
+/**
+ * 能看到手牌的队友。**那道 mode.hidden 的闸只在这里,别处不要再判一次** ——
+ * 三种写法共用它,漏掉任何一处都是把身份表泄进提示词。
+ */
+function visibleMates(game: Game, self: Player, view: TeamHandsView): Player[] {
+  if (view === 'off' || game.mode.hidden) return [];
+  return game.players.filter(p => p.alive && p !== self && p.role === self.role);
+}
+
+/** `ask` 写法:摆在题面正前方的那一句 */
+export function teamHandsAsk(game: Game, self: Player, c: Codec, view: TeamHandsView): string {
+  const mates = visibleMates(game, self, view === 'ask' ? view : 'off');
+  if (!mates.length) return '';
+  const who = mates.map(m =>
+    `${c.player(m, self)} 手上有 ${m.hand.map(x => c.card(x)).join(' ') || '(空)'}`).join(';');
+  return `${who}。这会改变你接下来的选择吗?`;
 }
 
 export function situationBlock(
   game: Game, self: Player, c: Codec, opts: SituationOpts = {},
 ): string {
   const count = countCards(game, self);
+  const view = opts.teamHands ?? 'off';
+  const inlineMates = new Set(visibleMates(game, self, view === 'inline' ? view : 'off'));
   const lines: string[] = [`R${game.round} turn=${c.player(game.current)}`];
 
   lines.push('角色 hp 手牌 装备 判定区 身份 距你');
@@ -180,19 +237,34 @@ export function situationBlock(
     const label = (q: typeof p) => (game.mode.hidden ? q.role : ROLE_NAME[q.role]);
     const role = p.revealed || p === self ? label(p) : '?';
     const dist = p === self ? '-' : String(game.distance(self, p));
-    lines.push(`${c.player(p, self)} ${p.hp}/${p.maxHp} ${p.handCount} ${eq} ${jd} ${role} ${dist}`);
+    // inline 写法:手牌那一列从"几张"变成"几张(具体是哪几张)"。
+    // 括号里不留空格,否则会把这张表的列结构冲掉
+    const hand = inlineMates.has(p)
+      ? `${p.handCount}(${p.hand.map(x => c.card(x)).join(',') || '空'})`
+      : String(p.handCount);
+    lines.push(`${c.player(p, self)} ${p.hp}/${p.maxHp} ${hand} ${eq} ${jd} ${role} ${dist}`);
   }
 
   lines.push(`你 射程${game.attackRange(self)} 手牌上限${game.maxHand(self)}`);
   lines.push(`你的手牌 ${self.hand.map(x => c.card(x)).join(' ') || '(空)'}`);
 
-  // 队友明牌 —— 见 SituationOpts。mode.hidden 那道闸在这里,不在调用方
-  if (opts.teamHands && !game.mode.hidden) {
-    const mates = game.players.filter(p => p.alive && p !== self && p.role === self.role);
-    for (const m of mates) {
-      lines.push(`队友明牌 ${c.player(m, self)} ${m.hand.map(x => c.card(x)).join(' ') || '(空)'}`);
-    }
-    if (mates.length) lines.push('(本局你能看到队友的手牌,对方看不到你们的)');
+  // 蜂群:自己操控的另外那几只手,和"你的手牌"并列
+  for (const h of opts.hive ?? []) {
+    if (h === self || !h.alive) continue;
+    lines.push(`你操控的 ${c.player(h, self)} 手牌 ` +
+      (h.hand.map(x => c.card(x)).join(' ') || '(空)'));
+  }
+  if ((opts.hive?.length ?? 0) > 1) {
+    lines.push(`本次要你替 ${c.player(self, self)} 做决定。`);
+  }
+
+  // tail 写法:摆在局势块末尾的独立几行。inline 已经写进上面那张表了
+  const tailMates = visibleMates(game, self, view === 'tail' ? view : 'off');
+  for (const m of tailMates) {
+    lines.push(`队友明牌 ${c.player(m, self)} ${m.hand.map(x => c.card(x)).join(' ') || '(空)'}`);
+  }
+  if (inlineMates.size || tailMates.length) {
+    lines.push('(本局你能看到队友的手牌,对方看不到你们的)');
   }
 
   const h = hostilityBlock(game, c);

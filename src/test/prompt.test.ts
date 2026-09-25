@@ -21,6 +21,7 @@ import { Codec } from '../ai/codec.js';
 import { generals, cardSpecs } from '../core/registry.js';
 import {
   buildRules, eventsBlock, filterLog, identityBlock, situationBlock, hostilityBlock,
+  teamHandsAsk,
 } from '../ai/rulesPrompt.js';
 import type { Game } from '../core/game.js';
 import { realCard } from '../core/types.js';
@@ -260,7 +261,7 @@ test('明牌:只给队友,只在阵营公开的模式,而且默认关', () => {
   const off = situationBlock(g, me, c);
   assert.doesNotMatch(off, /桃\[♥5\]/, '默认必须看不见队友手牌');
 
-  const on = situationBlock(g, me, c, { teamHands: true });
+  const on = situationBlock(g, me, c, { teamHands: 'tail' });
   assert.match(on, /队友明牌.*桃\[♥5\]/, '开了才看得见队友的');
   assert.doesNotMatch(on, /无懈可击\[♠9\]/, '敌人的手牌永远不能露');
   assert.doesNotMatch(on, /决斗\[♣4\]/);
@@ -275,7 +276,44 @@ test('明牌:身份局里开了也不生效 —— 否则等于把身份表写�
   const [me, same] = rebels;
   for (const p of g.players) p.hand = [];
   give(g, same, '闪', '♦', 2);
-  const text = situationBlock(g, me, new Codec(g, 'verbose'), { teamHands: true });
+  const text = situationBlock(g, me, new Codec(g, 'verbose'), { teamHands: 'tail' });
   assert.doesNotMatch(text, /闪\[♦2\]/, '身份局里这个旋钮必须是空操作');
   assert.doesNotMatch(text, /队友明牌/);
+});
+
+test('明牌的三种写法各自落在该落的地方', () => {
+  /*
+   * 60 局跑下来模型几乎没读队友手牌(3094 条推理里逐字引用 2 条),所以这一轮
+   * 分离的变量是**怎么给**而不是**给不给**。三种写法必须真的不一样,
+   * 否则跑出来的"没差别"是实现没生效,不是注意力没被拉动。
+   */
+  const g = createGame({
+    mode: 'team2v2', playerCount: 4, seed: 7, log: () => {},
+    fixedGenerals: { 0: '赵云', 1: '周瑜', 2: '关羽', 3: '甘宁' },
+    makeAgent: () => new BasicAI('x'),
+  });
+  const me = g.players[0], mate = g.players[3];
+  assert.equal(me.role, mate.role);
+  for (const p of g.players) p.hand = [];
+  give(g, mate, '桃', '♥', 5);
+  const c = new Codec(g, 'verbose');
+  const row = (t: string) => t.split('\n').find(l => l.startsWith(`${c.player(mate, me)} `))!;
+
+  const tail = situationBlock(g, me, c, { teamHands: 'tail' });
+  assert.match(tail, /队友明牌.*桃\[♥5\]/, 'tail:摆在局势块末尾的独立行');
+  assert.doesNotMatch(row(tail), /桃\[♥5\]/, 'tail 不该动角色表那一行');
+
+  const inline = situationBlock(g, me, c, { teamHands: 'inline' });
+  assert.match(row(inline), /1\(桃\[♥5\]\)/, 'inline:并进角色表,手牌那一列变成"张数(具体牌)"');
+  assert.doesNotMatch(inline, /队友明牌/, 'inline 不该再重复一遍');
+  // 列结构不能被冲掉 —— 括号里不留空格,整行的字段数要和表头一致
+  assert.equal(row(inline).split(' ').length, row(tail).split(' ').length,
+    '角色表是靠空格分列的,inline 写法不能多出空格');
+
+  // ask 不在局势块里,而是贴着题面 —— 这一版探的就是"离问题越近注意力是否越高"
+  assert.doesNotMatch(situationBlock(g, me, c, { teamHands: 'ask' }), /桃\[♥5\]/);
+  assert.match(teamHandsAsk(g, me, c, 'ask'), /桃\[♥5\].*这会改变你/);
+  assert.equal(teamHandsAsk(g, me, c, 'tail'), '', 'ask 那句只在 ask 写法下出现');
+  assert.equal(teamHandsAsk(mk({}, 5), mk({}, 5).players[0], c, 'ask'), '',
+    '身份局里三种写法一律空操作');
 });

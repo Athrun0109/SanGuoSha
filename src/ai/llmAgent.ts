@@ -28,6 +28,7 @@ import type { CodecMode } from './codec.js';
 import { PLAN_SCHEMA, PlanRunner, isPlayAction, type PlanStep } from './plan.js';
 import {
   buildRules, eventsBlock, filterLog, identityBlock, planHint, questionBlock, situationBlock,
+  teamHandsAsk, type TeamHandsView,
 } from './rulesPrompt.js';
 
 /** 只依赖这一点点接口,方便测试时注入假客户端 */
@@ -87,13 +88,32 @@ export interface LLMAgentOptions {
    * 那是个对照实验用的旋钮,默认关,而且只在阵营公开的模式下生效。
    * 开了必须记进对局日志,否则这局的数据事后切不开。
    */
-  teamHands?: boolean;
+  teamHands?: TeamHandsView;
+  /**
+   * 【蜂群】这一个实例同时操控哪几个席位(座位号)。
+   *
+   * 存在的理由是量出**协同的上界**:同一个模型、同一份上下文、同一份记忆同时开两只手,
+   * 信息完全共享、意图天然一致,不需要任何沟通手段。明牌/留言这些"半协同"手段
+   * 最多也就能捞回这个上界和单打独斗之间的差。不知道天花板在哪,
+   * 就没法判断某个协同手段"没效果"是手段不行还是本来就没多少可捞。
+   *
+   * 注意这**不是**"看得见队友手牌"(那是 teamHands)。这是"那也是你的手"。
+   */
+  hiveSeats?: number[];
   fallback?: Agent;
   onDecision?: (info: DecisionInfo) => void;
 }
 
 export interface DecisionInfo {
   agentId: string;
+  /**
+   * 这次是**替哪个席位**做的决定。
+   *
+   * 不能靠 agentId 的尾号反推:蜂群下一个实例服务两个席位,id 是 `llm-blue`
+   * 这种没有尾号的,所有决策会静默地落不到任何席位上 —— 统计不会报错,
+   * 只会显示成"这一组没有 LLM 调用"。
+   */
+  seat?: number;
   prompt: string;
   options: string[];
   thinking: string;
@@ -216,7 +236,18 @@ export class LLMAgent extends ChoiceAgent {
   private lastError = '';
   private errorRepeats = 0;
   /** 计划执行器:模型一次写好几步,后续几步直接本地兑现,不再发请求 */
-  private planner = new PlanRunner();
+  /**
+   * **计划必须按席位分开。**一份计划是"某个人这个回合接下来做什么",
+   * 里面钉着那个人的手牌 id 和体力。蜂群下一个实例服务两个席位,
+   * 共用一个 PlanRunner 会让 P0 的计划在轮到 P3 时被拿去核对 ——
+   * 手牌对不上,于是每次都判成"计划外"作废,白白多花一堆请求。
+   */
+  private planners = new Map<number, PlanRunner>();
+  private plannerOf(p: Player): PlanRunner {
+    let r = this.planners.get(p.seat);
+    if (!r) { r = new PlanRunner(); this.planners.set(p.seat, r); }
+    return r;
+  }
   /** 身份判断的持久记忆。人数 ≤2 时自动停用 */
   beliefs: BeliefTable | null = null;
 
@@ -243,7 +274,8 @@ export class LLMAgent extends ChoiceAgent {
       historyRounds: opts.historyRounds ?? 10,
       maxLogLines: opts.maxLogLines ?? 40,
       maxLogChars: opts.maxLogChars ?? 350,
-      teamHands: opts.teamHands ?? false,      // 实验开关,默认关
+      teamHands: opts.teamHands ?? 'off',      // 实验开关,默认关
+      hiveSeats: opts.hiveSeats ?? [],          // 同上
       selfNotes: opts.selfNotes ?? 4,
       plan: opts.plan ?? true,
     };
@@ -252,12 +284,28 @@ export class LLMAgent extends ChoiceAgent {
 
   // ————————————————— 提示词组装 —————————————————
 
+  /** 这个实例操控的席位。非蜂群时就是它自己 */
+  private hive(game: Game, self: Player): Player[] {
+    const seats = this.o.hiveSeats;
+    if (!seats?.length) return [self];
+    return game.players.filter(p => seats.includes(p.seat));
+  }
+
   private ensureSystem(game: Game, self: Player) {
     if (this.system) return this.system;
     const c = this.c(game);
+    /*
+     * L1 带 cache_control,**只建一次**。所以蜂群下它必须一次覆盖两个席位 ——
+     * 按"第一个来问的那个人"建的话,轮到另一个人时身份就是错的,而且它还被缓存着。
+     */
+    const hive = this.hive(game, self);
     this.system = [
       { type: 'text', text: buildRules(c, game.mode) },
-      { type: 'text', text: identityBlock(game, self, c), cache_control: { type: 'ephemeral' } },
+      {
+        type: 'text',
+        text: identityBlock(game, self, c, hive.length > 1 ? hive : undefined),
+        cache_control: { type: 'ephemeral' },
+      },
     ];
     return this.system;
   }
@@ -275,13 +323,15 @@ export class LLMAgent extends ChoiceAgent {
     kind: AskKind = 'option',
   ): Promise<number[] | null> {
     // 这一步计划里已经写好了?那就直接兑现,一个请求都不发
-    const planned = this.planner.answer(game, self, question, options, min, max, kind, (why) => {
+    const planner = this.plannerOf(self);
+    const planned = planner.answer(game, self, question, options, min, max, kind, (why) => {
       game.log(`  \x1b[90m※ ${this.id} 放弃剩余计划(${why})\x1b[0m`);
     });
     if (planned) {
       this.stats.planned++;
       this.onDecision?.({
-        agentId: this.id, prompt: question, options, thinking: '(按计划执行)',
+        agentId: this.id, seat: self.seat, prompt: question, options,
+        thinking: '(按计划执行)',
         choice: planned, usedFallback: false, payloadChars: 0, fromPlan: true,
       });
       return planned;
@@ -298,12 +348,19 @@ export class LLMAgent extends ChoiceAgent {
     // 只有出牌阶段才谈得上"接下来几步"
     const wantPlan = this.o.plan && isPlayAction(question);
 
-    const parts = [situationBlock(game, self, c, { teamHands: this.o.teamHands })];
+    const hive = this.hive(game, self);
+    const parts = [situationBlock(game, self, c, {
+      teamHands: this.o.teamHands,
+      hive: hive.length > 1 ? hive : undefined,
+    })];
+    // ask 写法要贴着题面 —— 这一版探的就是"离问题越近,注意力是不是越高"
+    const ask = teamHandsAsk(game, self, c, this.o.teamHands);
     const ev = eventsBlock(this.recentLog(game), c, this.o.maxLogChars);
     if (ev) parts.push(ev);
     const bl = this.beliefs.render(game, self, c);
     if (bl) parts.push(bl);
     if (this.notes.length) parts.push(`你最近的判断\n${this.notes.map(n => '- ' + n).join('\n')}`);
+    if (ask) parts.push(ask);
     parts.push(questionBlock(question, options, min, max, c));
     if (wantReads) parts.push(BeliefTable.refreshHint());
     if (wantPlan) parts.push(planHint());
@@ -429,21 +486,23 @@ export class LLMAgent extends ChoiceAgent {
       // 把这次选中的选项文本一并交过去 —— 计划的第一步描述的就是它,
       // 核对上了就能顺带答掉它的目标/区域
       const chose = choice.length === 1 ? options[choice[0]] : undefined;
-      this.planner.adopt(game, self, newPlan, chose, (why) => {
+      planner.adopt(game, self, newPlan, chose, (why) => {
         if (why !== '模型给的计划为空') game.log(`  \x1b[90m※ ${this.id} 计划未采纳(${why})\x1b[0m`);
       });
     }
 
     this.stats.payloadChars += payload.length;
-    this.stats.planDropped = this.planner.dropped;
+    this.stats.planDropped = [...this.planners.values()].reduce((n, r) => n + r.dropped, 0);
     if (choice === null) this.stats.fallbacks++;
     else if (thinking) {
-      this.notes.push(thinking);
+      // 蜂群下这份记忆是共用的(那正是"一个脑子"的含义),
+      // 但必须标明当时替谁在想,否则两个席位的判断会混成一团
+      this.notes.push(hive.length > 1 ? `(替${c.player(self, self)})${thinking}` : thinking);
       if (this.notes.length > this.o.selfNotes) this.notes.shift();
     }
 
     this.onDecision?.({
-      agentId: this.id, prompt: question, options, thinking,
+      agentId: this.id, seat: self.seat, prompt: question, options, thinking,
       choice: choice ?? [], usedFallback: choice === null,
       error: choice === null ? (lastErr || '模型连续给出不合法的选择') : undefined,
       payloadChars: payload.length, usage,
