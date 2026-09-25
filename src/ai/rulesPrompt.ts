@@ -36,7 +36,8 @@ export function buildRules(c: Codec, mode: GameMode = identityMode): string {
 
 ${mode.name === 'team2v2'
   ? `胜负 两队各2人,**一队全部阵亡则另一队获胜**。队伍是公开的,没有隐藏身份,也没有击败奖励。
-座次 队伍交替坐成"甲乙乙甲",所以你的两个邻座一个是队友、一个是对手`
+座次 队伍交替坐成"甲乙甲乙",**你的两个邻座都是对手,队友坐在你对面**
+顺序 但出牌顺序不跟座次走,而是 队1→队2→队2→队1(先手方走第一个和第四个)`
   : `胜负 lord:击败所有 rebel 和 renegade | rebel:击败 lord(任一 rebel 存活即算赢)| renegade:成为唯一存活者
 奖惩 击败 rebel → 摸3张 | lord 击败 loyalist → lord 弃光所有牌`}
 阵亡 退出这一局,手牌装备判定牌全部弃置,之后不再行动 —— 胜负只看最后哪个阵营还有人活着,和你囤了多少牌无关

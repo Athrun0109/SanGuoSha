@@ -32,15 +32,19 @@ function mk(seed = 20260819, fixedRoles?: Record<number, Role>, fixedGenerals?: 
   });
 }
 
-test('座次是"甲乙乙甲",出牌顺序天然就是 队1→队2→队2→队1', () => {
+test('阵营按下标排成"甲乙乙甲",出牌顺序天然就是 队1→队2→队2→队1', () => {
+  /*
+   * 这里查的是**回合顺序**,不是圆桌座次 —— 两者现在是分开的(见 GameMode.ring)。
+   * 「邻座」这个词只用于圆桌(距离 1),那一头由下面"圆桌座次和回合顺序是两件事"那条覆盖。
+   */
   const g = mk();
   assert.deepEqual(g.players.map(p => p.role), ['blue', 'red', 'red', 'blue']);
-  // 引擎按座位号推进,所以座次即顺序;每个人的两个邻座一个队友一个对手
+  // 引擎按下标推进回合,所以下标顺序即出牌顺序:前后两个行动者必须一边一个交替
   for (const p of g.players) {
-    const left = g.players[(p.seat + 1) % 4];
-    const right = g.players[(p.seat + 3) % 4];
-    assert.notEqual(g.ally(p, left), g.ally(p, right),
-      `${p.seat} 号位的两个邻座应该一边一个`);
+    const next = g.players[(p.seat + 1) % 4];
+    const prev = g.players[(p.seat + 3) % 4];
+    assert.notEqual(g.ally(p, next), g.ally(p, prev),
+      `${p.seat} 号位在出牌顺序上的前后两位应该一边一个`);
   }
   assert.equal(g.current.seat, 0, '0 号位先手');
 });

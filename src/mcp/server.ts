@@ -51,7 +51,8 @@ server.registerTool('new_game', {
     mode: z.enum(['identity', 'team2v2']).optional()
       .describe('identity(默认)身份局:主公/忠臣/反贼/内奸,身份要靠推理。' +
         'team2v2 组队对抗:固定 4 人两队,队伍公开、没有主公、没有击杀奖励;' +
-        '座次是"甲乙乙甲",0、3 号位一队,1、2 号位一队'),
+        '0、3 号位一队,1、2 号位一队,出牌顺序 队1→队2→队2→队1;' +
+        '圆桌上两个邻座都是对手,队友坐对面'),
     players: z.number().int().min(2).max(8).optional()
       .describe('总人数 2~8,默认 2(1v1 单挑)。team2v2 固定 4 人,这个参数会被忽略'),
     seat: z.number().int().min(0).max(7).optional()
